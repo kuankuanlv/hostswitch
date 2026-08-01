@@ -1,0 +1,21 @@
+[package]
+name = "hostswitch"
+version = "0.1.0"
+edition = "2024"
+description = "跨平台 hosts 文件管理与切换工具"
+license = "MIT"
+
+[dependencies]
+eframe = "0.27"
+egui = "0.27"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
