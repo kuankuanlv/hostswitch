@@ -1,6 +1,6 @@
 # hostswitch
 
-macOS hosts 文件管理与切换工具，纯 Rust + egui 实现，无 WebView 依赖。
+macOS / Windows hosts 文件管理与切换工具，纯 Rust + egui 实现，无 WebView 依赖。
 
 ## 1. 项目介绍
 
@@ -14,11 +14,11 @@ hostswitch 帮助开发者管理多套 hosts 配置方案（环境），支持�
 - 写入前格式校验（错误阻断、警告放行）
 - 写入后自动刷新 DNS 缓存
 - 写 hosts / 刷 DNS 在后台线程执行，不卡界面；失败自动回滚激活状态
-- macOS 按需提权（Authorization Services 授权框，授权一次进程内复用），平时以普通权限运行
+- 按需提权：macOS 用 Authorization Services 授权框、授权一次进程内复用；Windows 会话内首次弹 UAC，后续静默复用，行为与 macOS 一致；平时以普通权限运行
 - 主题跟随系统，支持 Auto / Dark / Light 循环切换
 - 内置 Console 日志窗口，实时查看应用日志
 
-**技术栈：** Rust、egui/eframe（glow 后端，内存占用小）、serde/chrono、tracing、security-framework-sys
+**技术栈：** Rust、egui/eframe（glow 后端，内存占用小）、serde/chrono、tracing、security-framework-sys、windows-sys
 
 **配置目录：** `~/.hostswitch/`
 
@@ -32,10 +32,10 @@ hostswitch 帮助开发者管理多套 hosts 配置方案（环境），支持�
 - 配置文件持久化（独立 env 文件 + state.json，兼容旧版单激活配置迁移）
 - 格式校验（错误阻断启用，警告提示不阻断）
 - DNS 缓存自动刷新
-- macOS 平台支持（其他平台编译直接报错）
+- macOS / Windows 平台支持（其他平台编译直接报错）
 - 三模式主题（跟随系统 / Dark / Light）
 - Console 日志窗口（tracing 环形缓冲 500 条）
-- 快捷键 Cmd+S 保存；Current Machine 保存后立即写系统 hosts
+- 快捷键 Cmd+S（Windows 为 Ctrl+S）保存；Current Machine 保存后立即写系统 hosts
 
 ### 待实现
 
@@ -48,7 +48,7 @@ hostswitch 帮助开发者管理多套 hosts 配置方案（环境），支持�
 
 **v1.0 规划**
 
-- Windows / Linux 平台支持（需新增 platform 实现）
+- Linux 平台支持（暂不支持，编译直接报错，需新增 platform 实现）
 - 结构化编辑视图（表格形式）
 - 单条 hosts 行内启用 / 禁用
 - import / export
@@ -72,9 +72,11 @@ hostswitch/
     ├── storage/            # 存储层
     │   └── config_store.rs # 配置文件读写
     ├── platform/           # 平台抽象层
-    │   ├── traits.rs       # HostsPlatform trait
     │   ├── macos.rs        # macOS 实现（Authorization Services 提权）
-    │   └── factory.rs      # 平台工厂，非 macOS 编译报错
+    │   ├── windows.rs      # Windows 实现（提权助手 + 命名管道）
+    │   ├── win_protocol.rs # Windows 助手协议纯逻辑（编解码/白名单，可跨平台单测）
+    │   ├── factory.rs      # 平台工厂，按系统选择实现
+    │   └── traits.rs       # HostsPlatform 抽象
     ├── service/            # 业务逻辑层
     │   ├── env_manager.rs  # 环境管理核心逻辑（激活/停用/合并/回滚）
     │   ├── hosts_validator.rs  # hosts 格式校验
@@ -97,7 +99,7 @@ hostswitch/
 
 ## 4. 快速开始
 
-**环境要求：** macOS、Rust 1.85+
+**环境要求：** macOS / Windows、Rust 1.85+
 
 ```bash
 # 编译
@@ -133,10 +135,10 @@ cargo test
 
 ## 5. 使用说明
 
-1. 首次启动会自动创建 Current Machine（local）环境，内容来自当前系统 `/etc/hosts`
+1. 首次启动会自动创建 Current Machine（local）环境，内容来自当前系统 hosts 文件（macOS 为 `/etc/hosts`，Windows 为 `C:\Windows\System32\drivers\etc\hosts`）
 2. 左侧列表选择环境，右侧编辑器修改 hosts 内容；内置环境显示为 "Current Machine"，不可删除
-3. **保存**（按钮或 Cmd+S）：普通环境只写入本地配置；Current Machine 保存后立即合并写入系统 hosts
-4. **启用**：勾选环境旁的绿色复选框，校验格式 → 合并 → 写入系统 hosts → 刷新 DNS（首次需输入管理员密码，之后授权复用不再弹框）；多选可叠加启用，取消勾选即停用
+3. **保存**（按钮或 Cmd+S / Ctrl+S）：普通环境只写入本地配置；Current Machine 保存后立即合并写入系统 hosts
+4. **启用**：勾选环境旁的绿色复选框，校验格式 → 合并 → 写入系统 hosts → 刷新 DNS（macOS 首次输入管理员密码、Windows 会话内首次弹 UAC，之后授权复用不再弹框）；多选可叠加启用，取消勾选即停用
 5. 顶栏右侧可开关 **Console** 日志窗口、循环切换 **Auto / Dark / Light** 主题
 6. 底部状态栏显示最近操作结果与未保存（Unsaved）标记
 
@@ -147,13 +149,14 @@ UI Layer (egui) —— 纯渲染，返回 Action
     ↓
 Service Layer (EnvManager / HostsValidator / HostsMerger)
     ↓
-Platform Layer (HostsPlatform trait → macOS 实现)
+Platform Layer (HostsPlatform trait → macOS / Windows 实现)
     ↓
 Storage Layer (ConfigStore → ~/.hostswitch/)
 ```
 
 - UI 层不直接碰应用状态：sidebar / editor / dialog 渲染后返回动作，由 app.rs 统一执行
 - 写系统 hosts / 刷新 DNS 在后台线程执行，主线程每帧轮询结果，失败回滚激活状态
+- Windows 提权由常驻提权助手（windows.rs，命名管道通信）承担：主进程正常退出时主动撤销（BYE），异常退出由助手看门狗兜底，不会残留提权进程
 - 依赖单向：main → app → service/ui/theme/logs；叶子为 model / platform / theme / logs
 - 环境排序：Current Machine 恒在最前，其余按创建时间（新增的放最后）
 
