@@ -51,7 +51,7 @@ impl HostsValidator {
                 issues.push(ValidationIssue {
                     line_number,
                     level: ValidationLevel::Error,
-                    message: "格式错误：每行至少需要 IP 和 域名 两列".to_string(),
+                    message: "format error: each line needs at least IP and hostname columns".to_string(),
                     line_content: line.to_string(),
                 });
                 continue;
@@ -65,7 +65,7 @@ impl HostsValidator {
                 issues.push(ValidationIssue {
                     line_number,
                     level: ValidationLevel::Error,
-                    message: format!("IP 地址格式无效: {}", ip_str),
+                    message: format!("invalid IP address: {}", ip_str),
                     line_content: line.to_string(),
                 });
                 continue;
@@ -76,7 +76,7 @@ impl HostsValidator {
                 issues.push(ValidationIssue {
                     line_number,
                     level: ValidationLevel::Warning,
-                    message: format!("域名格式可能有问题: {}", domain),
+                    message: format!("suspicious domain format: {}", domain),
                     line_content: line.to_string(),
                 });
             }
