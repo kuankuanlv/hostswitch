@@ -2,7 +2,8 @@
 name = "hostswitch"
 version = "0.1.0"
 edition = "2024"
-description = "跨平台 hosts 文件管理与切换工具"
+rust-version = "1.85"
+description = "macOS hosts 文件管理与切换工具"
 license = "MIT"
 
 [dependencies]
