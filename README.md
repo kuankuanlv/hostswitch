@@ -1,6 +1,6 @@
 # hostswitch
 
-macOS / Windows hosts 文件管理与切换工具，纯 Rust + egui（glow 后端）实现，无 WebView 依赖。
+hosts 文件管理与切换工具，纯 Rust 实现，无 WebView 依赖，支持 macOS 、 Windows。
 
 ## 项目目录架构
 
