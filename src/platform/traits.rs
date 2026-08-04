@@ -14,6 +14,25 @@ pub trait HostsPlatform {
     /// 检查当前进程是否有管理员权限
     fn has_admin_privileges(&self) -> bool;
 
+    /// 确保已获得管理员权限：授权一次后本次启动期间复用，不再弹框
+    fn ensure_elevated(&self) -> Result<()>;
+
     /// 系统 hosts 文件路径
     fn hosts_file_path(&self) -> &str;
+}
+
+/// 根据当前操作系统创建对应的平台实现
+pub fn create_platform() -> Box<dyn HostsPlatform + Send + Sync> {
+    #[cfg(target_os = "macos")]
+    {
+        Box::new(super::MacosPlatform::new())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Box::new(super::WindowsPlatform::new())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        compile_error!("platform not supported yet, macOS and Windows only");
+    }
 }

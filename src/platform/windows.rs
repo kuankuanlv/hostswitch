@@ -118,7 +118,8 @@ impl WindowsPlatform {
         let pid = std::process::id();
         let mut cmd = runas::Command::new(exe);
         cmd.arg("--helper").arg("--parent-pid").arg(pid.to_string());
-        cmd.show(false); // 隐藏提权进程窗口（runas::Command::show 接受 bool，false=隐藏）
+        cmd.show(false); // 隐藏 helper 自身窗口：--helper 模式是无 UI 后台进程，显示只会闪一个空窗；
+        // UAC 确认框由系统 ShellExecute 弹出，不受 show() 影响，用户仍能看到提权确认
         // runas 的 status() 会阻塞到子进程退出；helper 与主进程同生命周期，
         // 放后台线程等待，主进程不阻塞
         std::thread::spawn(move || {
@@ -199,6 +200,9 @@ impl HostsPlatform for WindowsPlatform {
     }
 
     fn write_system_hosts(&self, content: &str) -> Result<()> {
+        // 先确保已提权：已提权或 helper 就绪则直接复用；否则启动 helper（首次弹 UAC）
+        self.ensure_elevated()?;
+
         // 已提权：直接写
         if self.has_admin_privileges() {
             return self.write_hosts_elevated(content);
@@ -221,6 +225,9 @@ impl HostsPlatform for WindowsPlatform {
     }
 
     fn flush_dns_cache(&self) -> Result<()> {
+        // 先确保已提权：已提权或 helper 就绪则直接复用；否则启动 helper（首次弹 UAC）
+        self.ensure_elevated()?;
+
         // 已提权：直接执行
         if self.has_admin_privileges() {
             let status = std::process::Command::new("ipconfig")
@@ -261,6 +268,11 @@ impl HostsPlatform for WindowsPlatform {
             CloseHandle(token);
             ok != 0 && elevation.TokenIsElevated != 0
         }
+    }
+
+    fn ensure_elevated(&self) -> Result<()> {
+        // 已提权或 helper 已就绪则直接复用；否则启动 helper（首次弹 UAC）
+        self.ensure_helper()
     }
 
     fn hosts_file_path(&self) -> &str {

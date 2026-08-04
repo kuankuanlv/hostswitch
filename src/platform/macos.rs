@@ -110,99 +110,40 @@ impl MacosPlatform {
     /// 提权执行命令：授权一次后进程内复用，不再弹框
     #[cfg(not(test))]
     fn run_privileged(&self, command: &str) -> Result<()> {
-        // 缓存授权可能失效（如系统策略变化）：丢弃缓存重试一次
-        let mut retried = false;
+        // 确保已提权：本次启动内已授权则直接复用，不弹框
+        self.ensure_elevated()?;
 
-        loop {
-            let auth = Self::authorize()?;
+        // 此处拿到的授权引用来自缓存，不会再次弹框
+        let auth = Self::authorize()?;
 
-            // 注册自定义授权项：授权框里显示具体要干什么（只注册一次，这步很慢）
-            static RIGHT_REGISTERED: std::sync::atomic::AtomicBool =
-                std::sync::atomic::AtomicBool::new(false);
-            if !RIGHT_REGISTERED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                register_privilege_right(auth);
-            }
-
-            // 申请管理员权限：已授权过就直接通过，不弹框
-            // 标准 execute 权限 + 自定义授权项（弹框描述）
-            let sys_right = CString::new("system.privilege.admin").unwrap();
-            let custom_right = CString::new(PRIVILEGE_RIGHT).unwrap();
-            let mut items = [
-                AuthorizationItem {
-                    name: sys_right.as_ptr(),
-                    valueLength: 0,
-                    value: std::ptr::null_mut(),
-                    flags: 0,
-                },
-                AuthorizationItem {
-                    name: custom_right.as_ptr(),
-                    valueLength: 0,
-                    value: std::ptr::null_mut(),
-                    flags: 0,
-                },
-            ];
-            let rights = AuthorizationRights {
-                count: 2,
-                items: items.as_mut_ptr(),
-            };
-            let status = unsafe {
-                AuthorizationCopyRights(
-                    auth,
-                    &rights,
-                    std::ptr::null(),
-                    kAuthorizationFlagExtendRights
-                        | kAuthorizationFlagInteractionAllowed
-                        | kAuthorizationFlagPreAuthorize,
-                    std::ptr::null_mut(),
-                )
-            };
-            if status != errAuthorizationSuccess {
-                if status == errAuthorizationCanceled {
-                    return Err(anyhow!("user canceled authorization"));
-                }
-                // 缓存授权失效：清缓存重试一次（SwitchHosts 同款逻辑）
-                if !retried
-                    && (status == errAuthorizationInvalidRef || status == errAuthorizationDenied)
-                {
-                    warn!("cached authorization invalid ({}), retrying once", status);
-                    *AUTH_REF
-                        .lock()
-                        .map_err(|_| anyhow!("authorization mutex error"))? = None;
-                    retried = true;
-                    continue;
-                }
-                return Err(anyhow!("authorization failed: {}", status));
-            }
-
-            // 以 root 执行 /bin/sh -c "command"
-            let c_command = CString::new(command).map_err(|_| anyhow!("command contains null byte"))?;
-            let dash_c = CString::new("-c").unwrap();
-            let sh = CString::new("/bin/sh").unwrap();
-            let mut args: [*mut c_char; 3] = [
-                dash_c.as_ptr() as *mut c_char,
-                c_command.as_ptr() as *mut c_char,
+        // 以 root 执行 /bin/sh -c "command"
+        let c_command = CString::new(command).map_err(|_| anyhow!("command contains null byte"))?;
+        let dash_c = CString::new("-c").unwrap();
+        let sh = CString::new("/bin/sh").unwrap();
+        let mut args: [*mut c_char; 3] = [
+            dash_c.as_ptr() as *mut c_char,
+            c_command.as_ptr() as *mut c_char,
+            std::ptr::null_mut(),
+        ];
+        let status = unsafe {
+            AuthorizationExecuteWithPrivileges(
+                auth,
+                sh.as_ptr(),
+                kAuthorizationFlagDefaults,
+                args.as_mut_ptr(),
                 std::ptr::null_mut(),
-            ];
-            let status = unsafe {
-                AuthorizationExecuteWithPrivileges(
-                    auth,
-                    sh.as_ptr(),
-                    kAuthorizationFlagDefaults,
-                    args.as_mut_ptr(),
-                    std::ptr::null_mut(),
-                )
-            };
-            if status != errAuthorizationSuccess {
-                // 废弃 API 被移除时回退 osascript
-                if status == ERR_AUTH_FN_NO_LONGER_EXISTS {
-                    warn!("AuthorizationExecuteWithPrivileges unavailable, falling back to osascript");
-                    return self.run_privileged_osascript(command);
-                }
-                return Err(anyhow!("privileged execution failed: {}", status));
+            )
+        };
+        if status != errAuthorizationSuccess {
+            // 废弃 API 被移除时回退 osascript
+            if status == ERR_AUTH_FN_NO_LONGER_EXISTS {
+                warn!("AuthorizationExecuteWithPrivileges unavailable, falling back to osascript");
+                return self.run_privileged_osascript(command);
             }
-
-            return Ok(());
+            return Err(anyhow!("privileged execution failed: {}", status));
         }
+
+        Ok(())
     }
 
     /// 回退方案：osascript 提权（每次都会弹框）
@@ -372,6 +313,84 @@ impl HostsPlatform for MacosPlatform {
             .is_ok()
     }
 
+    /// 确保已获得管理员权限：授权一次后本次启动期间复用，不再弹框
+    #[cfg(test)]
+    fn ensure_elevated(&self) -> Result<()> {
+        // 测试环境不弹授权框，视为已提权
+        Ok(())
+    }
+
+    /// 确保已获得管理员权限：授权一次后本次启动期间复用，不再弹框
+    #[cfg(not(test))]
+    fn ensure_elevated(&self) -> Result<()> {
+        // 缓存授权可能失效（如系统策略变化）：丢弃缓存重试一次
+        let mut retried = false;
+
+        loop {
+            let auth = Self::authorize()?;
+
+            // 注册自定义授权项：授权框里显示具体要干什么（只注册一次，这步很慢）
+            static RIGHT_REGISTERED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !RIGHT_REGISTERED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                register_privilege_right(auth);
+            }
+
+            // 申请管理员权限：已授权过就直接通过，不弹框
+            // 标准 execute 权限 + 自定义授权项（弹框描述）
+            let sys_right = CString::new("system.privilege.admin").unwrap();
+            let custom_right = CString::new(PRIVILEGE_RIGHT).unwrap();
+            let mut items = [
+                AuthorizationItem {
+                    name: sys_right.as_ptr(),
+                    valueLength: 0,
+                    value: std::ptr::null_mut(),
+                    flags: 0,
+                },
+                AuthorizationItem {
+                    name: custom_right.as_ptr(),
+                    valueLength: 0,
+                    value: std::ptr::null_mut(),
+                    flags: 0,
+                },
+            ];
+            let rights = AuthorizationRights {
+                count: 2,
+                items: items.as_mut_ptr(),
+            };
+            let status = unsafe {
+                AuthorizationCopyRights(
+                    auth,
+                    &rights,
+                    std::ptr::null(),
+                    kAuthorizationFlagExtendRights
+                        | kAuthorizationFlagInteractionAllowed
+                        | kAuthorizationFlagPreAuthorize,
+                    std::ptr::null_mut(),
+                )
+            };
+            if status != errAuthorizationSuccess {
+                if status == errAuthorizationCanceled {
+                    return Err(anyhow!("user canceled authorization"));
+                }
+                // 缓存授权失效：清缓存重试一次（SwitchHosts 同款逻辑）
+                if !retried
+                    && (status == errAuthorizationInvalidRef || status == errAuthorizationDenied)
+                {
+                    warn!("cached authorization invalid ({}), retrying once", status);
+                    *AUTH_REF
+                        .lock()
+                        .map_err(|_| anyhow!("authorization mutex error"))? = None;
+                    retried = true;
+                    continue;
+                }
+                return Err(anyhow!("authorization failed: {}", status));
+            }
+
+            return Ok(());
+        }
+    }
+
     fn hosts_file_path(&self) -> &str {
         &self.hosts_path
     }
@@ -402,6 +421,14 @@ mod tests {
         let platform = MacosPlatform::new();
         let result = platform.run_privileged("echo hi");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ensure_elevated_ok_in_test() {
+        // 测试环境视为已提权，直接返回 Ok
+        let platform = MacosPlatform::new();
+        let result = platform.ensure_elevated();
+        assert!(result.is_ok());
     }
 
     #[test]
