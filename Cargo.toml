@@ -8,12 +8,13 @@ license = "MIT"
 
 [dependencies]
 # glow（OpenGL）后端比默认 wgpu 内存占用小很多
+# 临时切 wgpu：目标机是 QEMU Windows 无 GPU 驱动（OpenGL 仅 1.1），glow 起不来；wgpu 走 D3D12 WARP 软件渲染
 eframe = { version = "0.35", default-features = false, features = [
     "accesskit",
     "default_fonts",
     "wayland",
     "x11",
-    "glow",
+    "wgpu",
 ] }
 egui = "0.35"
 serde = { version = "1", features = ["derive"] }
