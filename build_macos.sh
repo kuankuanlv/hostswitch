@@ -8,7 +8,7 @@
 #   ./build_macos.sh clean     # 清理旧的打包产物
 #
 # 依赖: cargo、codesign（Xcode Command Line Tools）、hdiutil（系统自带）
-# 产物: target/release/hostswitch.app / target/release/hostswitch.dmg
+# 产物: dist/hostswitch.app / dist/hostswitch.dmg（与 build_windows.sh 的 dist/ 保持一致）
 #
 # 说明: ad-hoc 签名（-s -）仅用于本机/内部分发。
 # 公开分发需要 Developer ID 证书 + notarytool 公证，完整步骤：
@@ -29,9 +29,9 @@ LS_MIN_VERSION="11.0"            # 最低 macOS 版本（与 rustc 默认部署�
 cd "$(dirname "$0")"
 
 clean() {
-    rm -rf "target/release/${APP_NAME}.app" \
-           "target/release/${APP_NAME}.dmg" \
-           "target/release/dmg-staging"
+    rm -rf "dist/${APP_NAME}.app" \
+           "dist/${APP_NAME}.dmg" \
+           "dist/dmg-staging"
 }
 
 if [[ "${1:-}" == "clean" ]]; then
@@ -43,7 +43,7 @@ fi
 echo "==> cargo build --release"
 cargo build --release
 
-APP_DIR="target/release/${APP_NAME}.app"
+APP_DIR="dist/${APP_NAME}.app"
 CONTENTS="$APP_DIR/Contents"
 
 clean
@@ -102,7 +102,7 @@ echo "==> done: $APP_DIR"
 
 if [[ "${1:-}" == "dmg" ]]; then
     echo "==> building dmg"
-    STAGING="target/release/dmg-staging"
+    STAGING="dist/dmg-staging"
     rm -rf "$STAGING"
     mkdir -p "$STAGING"
     # ditto 保留 .app 的代码签名和 xattr（cp 不保留）
@@ -113,8 +113,8 @@ if [[ "${1:-}" == "dmg" ]]; then
         -volname "$APP_NAME" \
         -srcfolder "$STAGING" \
         -ov -format UDZO \
-        "target/release/${APP_NAME}.dmg"
+        "dist/${APP_NAME}.dmg"
 
     rm -rf "$STAGING"
-    echo "==> done: target/release/${APP_NAME}.dmg"
+    echo "==> done: dist/${APP_NAME}.dmg"
 fi

@@ -38,7 +38,7 @@ cargo run --release
 ./build_macos.sh clean      # 清理打包产物
 ```
 
-产物位于 `target/release/`。公开分发需使用 Developer ID 证书 + notarytool 公证。
+产物位于 `dist/`。公开分发需使用 Developer ID 证书 + notarytool 公证。
 
 ### Windows 打包
 
