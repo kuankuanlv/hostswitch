@@ -60,7 +60,8 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.85
+        # egui/eframe 0.35 要求 >= 1.92；与 Cargo.toml rust-version 对齐
+        uses: dtolnay/rust-toolchain@1.92
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
