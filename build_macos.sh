@@ -12,6 +12,8 @@
 #   - dist/hostswitch.app
 #   - dist/hostswitch.dmg（仅 dmg 模式）
 #
+# 只关心 macOS：本机原生构建，arch 跟当前机器走（不加 --target）。
+#
 # 说明: ad-hoc 签名（-s -）仅用于本机/内部分发。
 # 公开分发需要 Developer ID 证书 + notarytool 公证。
 set -euo pipefail

@@ -8,16 +8,18 @@ rem   build_windows.bat sign     build then Authenticode-sign
 rem   build_windows.bat clean    remove packaging artifacts
 rem
 rem Needs: Rust msvc toolchain + VS Build Tools with C++ tools
+rem Optional: rcedit on PATH or tools\rcedit.exe to embed exe icon
 rem Unified output dir (same as macOS): dist\
+rem Build is host-native for this OS only; arch follows the machine (no --target).
 rem ============================================================
 
 setlocal EnableExtensions
 set "APP_NAME=hostswitch"
-rem Native host build puts cargo output here. Do NOT use target\<triple>\...
-rem unless you also pass --target to cargo.
+rem Host-native cargo output (target\release\...), arch is transparent.
 set "EXE=target\release\%APP_NAME%.exe"
 set "DIST=dist"
 set "OUT_EXE=%DIST%\%APP_NAME%.exe"
+set "ICON=assets\icon.ico"
 set "PFX=cert\hostswitch.pfx"
 
 cd /d "%~dp0" || goto :fail
@@ -57,6 +59,10 @@ if errorlevel 1 (
     echo error: failed to copy to %DIST%\
     goto :fail
 )
+
+rem Embed icon before signing so signature is not invalidated later
+call :embed_icon
+if errorlevel 1 goto :fail
 
 if /i "%~1"=="sign" goto :sign
 
@@ -106,17 +112,52 @@ echo.
 exit /b 0
 
 :end_ok
-echo Press any key to close this window...
-pause >nul
+call :maybe_pause
 exit /b 0
 
 :fail
 echo.
 echo Build failed. See messages above.
 echo.
+call :maybe_pause
+exit /b 1
+
+rem CI=true (e.g. GitHub Actions): skip pause so the job does not hang
+:maybe_pause
+if /i "%CI%"=="true" exit /b 0
 echo Press any key to close this window...
 pause >nul
-exit /b 1
+exit /b 0
+
+rem Embed assets\icon.ico via rcedit; skip quietly if tool or ico missing
+:embed_icon
+if not exist "%ICON%" (
+    echo note: skip icon embed - %ICON% not found
+    exit /b 0
+)
+set "RCEDIT="
+if exist "%~dp0tools\rcedit.exe" set "RCEDIT=%~dp0tools\rcedit.exe"
+if not defined RCEDIT (
+    where rcedit >nul 2>&1
+    if not errorlevel 1 for /f "delims=" %%I in ('where rcedit') do (
+        set "RCEDIT=%%I"
+        goto :embed_icon_run
+    )
+)
+if not defined RCEDIT (
+    echo note: skip icon embed - rcedit not found
+    echo       put rcedit.exe in tools\ or PATH:
+    echo       https://github.com/electron/rcedit/releases
+    exit /b 0
+)
+:embed_icon_run
+echo ==^> embedding icon with rcedit
+"%RCEDIT%" "%OUT_EXE%" --set-icon "%ICON%"
+if errorlevel 1 (
+    echo error: rcedit failed to set icon
+    exit /b 1
+)
+exit /b 0
 
 :ensure_path
 for /f "tokens=2*" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v Path 2^>nul') do set "MACHINE_PATH=%%B"
