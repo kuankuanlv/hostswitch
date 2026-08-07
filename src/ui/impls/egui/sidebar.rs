@@ -1,7 +1,7 @@
 use eframe::egui;
 use egui::{Color32, CornerRadius, Stroke};
 
-use crate::theme::{theme_colors, RADIUS_SMALL};
+use super::theme::{theme_colors, RADIUS_SMALL};
 
 /// 环境列表的展示数据（只读视图，UI 层不碰应用状态）
 pub struct EnvInfo {

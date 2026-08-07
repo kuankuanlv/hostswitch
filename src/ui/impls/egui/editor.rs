@@ -1,7 +1,7 @@
 use eframe::egui;
 use egui::{Margin, Stroke};
 
-use crate::theme::{theme_colors, RADIUS_CARD};
+use super::theme::{theme_colors, RADIUS_CARD};
 
 /// 编辑器操作：渲染层上报用户意图，应用层执行
 pub enum EditorAction {

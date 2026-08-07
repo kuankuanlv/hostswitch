@@ -1,3 +1,5 @@
+//! 用户配置读写：都落在家目录下的固定子目录里
+
 use std::fs;
 use std::path::PathBuf;
 
@@ -6,30 +8,34 @@ use tracing::{debug, info, warn};
 
 use crate::model::AppState;
 
-/// Config storage layer: reads/writes all files under ~/.hostswitch/
+/// 配置根目录名（相对用户家目录）
+const CONFIG_DIR_NAME: &str = ".hostswitch";
+/// 各环境 hosts 正文所在子目录名
+const ENVS_DIR_NAME: &str = "envs";
+/// 全局状态文件名
+const STATE_FILE_NAME: &str = "state.json";
+
+/// 配置存储：管 ~/.hostswitch 下的 state 和各 env 文件
 pub struct ConfigStore {
-    /// envs directory: ~/.hostswitch/envs/
+    /// 环境正文目录，例如 ~/.hostswitch/envs
     pub envs_dir: PathBuf,
-    /// state.json path
+    /// 全局状态文件，例如 ~/.hostswitch/state.json
     pub state_file: PathBuf,
 }
 
 impl ConfigStore {
-    /// Create a ConfigStore instance, ensuring all directories exist
+    /// 建好实例，并确保配置目录存在
     pub fn new() -> Result<Self> {
-        let home = dirs::home_dir().context("Failed to get user home directory")?;
-        let root_dir = home.join(".hostswitch");
-        let envs_dir = root_dir.join("envs");
-        let state_file = root_dir.join("state.json");
+        let home = dirs::home_dir().context("拿不到用户家目录")?;
+        let root_dir = home.join(CONFIG_DIR_NAME);
+        let envs_dir = root_dir.join(ENVS_DIR_NAME);
+        let state_file = root_dir.join(STATE_FILE_NAME);
 
-        // Ensure directories exist
-        fs::create_dir_all(&envs_dir)
-            .with_context(|| format!("Failed to create envs directory: {}", envs_dir.display()))?;
+        fs::create_dir_all(&envs_dir).with_context(|| {
+            format!("创建环境目录失败: {}", envs_dir.display())
+        })?;
 
-        debug!(
-            root = %root_dir.display(),
-            "ConfigStore initialized"
-        );
+        debug!(root = %root_dir.display(), "ConfigStore 已初始化");
 
         Ok(Self {
             envs_dir,
@@ -39,96 +45,100 @@ impl ConfigStore {
 
     // ---------- state.json ----------
 
-    /// Load global state; returns default if file doesn't exist
+    /// 读全局状态；没有文件就返回默认值
     pub fn load_state(&self) -> Result<AppState> {
         if !self.state_file.exists() {
-            debug!("state.json not found, using default state");
+            debug!("没有 state.json，用默认状态");
             return Ok(AppState::default());
         }
 
-        let content = fs::read_to_string(&self.state_file)
-            .with_context(|| format!("Failed to read state.json: {}", self.state_file.display()))?;
+        let content = fs::read_to_string(&self.state_file).with_context(|| {
+            format!("读 state.json 失败: {}", self.state_file.display())
+        })?;
 
-        let state: AppState = serde_json::from_str(&content)
-            .context("Failed to parse state.json")?;
+        let state: AppState =
+            serde_json::from_str(&content).context("解析 state.json 失败")?;
 
-        debug!(
-            active_envs = ?state.active_env_ids,
-            "state.json loaded"
-        );
+        debug!(active_envs = ?state.active_env_ids, "已加载 state.json");
 
         Ok(state)
     }
 
-    /// Save global state
+    /// 写全局状态
     pub fn save_state(&self, state: &AppState) -> Result<()> {
-        let content = serde_json::to_string_pretty(state)
-            .context("Failed to serialize state.json")?;
+        let content =
+            serde_json::to_string_pretty(state).context("序列化 state.json 失败")?;
 
-        fs::write(&self.state_file, content)
-            .with_context(|| format!("Failed to write state.json: {}", self.state_file.display()))?;
+        fs::write(&self.state_file, content).with_context(|| {
+            format!("写 state.json 失败: {}", self.state_file.display())
+        })?;
 
-        debug!("Saved state.json");
+        debug!("已保存 state.json");
         Ok(())
     }
 
     // ---------- envs ----------
 
-    /// Get the file path for a given env's content
+    /// 某个环境正文文件的路径
     pub fn env_file_path(&self, env_id: &str) -> PathBuf {
         self.envs_dir.join(env_id)
     }
 
-    /// Read an env's hosts content
+    /// 读某个环境的 hosts 正文；文件不存在当空串
     pub fn load_env_content(&self, env_id: &str) -> Result<String> {
         let path = self.env_file_path(env_id);
 
         if !path.exists() {
-            warn!(env_id, "Env file not found, returning empty content");
+            warn!(env_id, "环境文件不存在，返回空内容");
             return Ok(String::new());
         }
 
         let content = fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read env file: {}", path.display()))?;
+            .with_context(|| format!("读环境文件失败: {}", path.display()))?;
 
-        debug!(env_id, len = content.len(), "Loaded env content");
+        debug!(env_id, len = content.len(), "已加载环境内容");
         Ok(content)
     }
 
-    /// Save an env's hosts content
+    /// 保存某个环境的 hosts 正文
     pub fn save_env_content(&self, env_id: &str, content: &str) -> Result<()> {
         let path = self.env_file_path(env_id);
 
         fs::write(&path, content)
-            .with_context(|| format!("Failed to write env file: {}", path.display()))?;
+            .with_context(|| format!("写环境文件失败: {}", path.display()))?;
 
-        debug!(env_id, len = content.len(), "Saved env content");
+        debug!(env_id, len = content.len(), "已保存环境内容");
         Ok(())
     }
 
-    /// Delete an env's content file
+    /// 删掉某个环境的正文文件（没有就当成功）
     pub fn delete_env_file(&self, env_id: &str) -> Result<()> {
         let path = self.env_file_path(env_id);
 
         if path.exists() {
             fs::remove_file(&path)
-                .with_context(|| format!("Failed to delete env file: {}", path.display()))?;
-            info!(env_id, "Deleted env file");
+                .with_context(|| format!("删环境文件失败: {}", path.display()))?;
+            info!(env_id, "已删除环境文件");
         }
 
         Ok(())
     }
 
-    /// Rename an env file
+    /// 环境文件改名（旧文件不存在就跳过）
     #[allow(dead_code)]
     pub fn rename_env_file(&self, old_id: &str, new_id: &str) -> Result<()> {
         let old_path = self.env_file_path(old_id);
         let new_path = self.env_file_path(new_id);
 
         if old_path.exists() {
-            fs::rename(&old_path, &new_path)
-                .with_context(|| format!("Failed to rename env file: {} -> {}", old_path.display(), new_path.display()))?;
-            info!(old_id, new_id, "Renamed env file");
+            fs::rename(&old_path, &new_path).with_context(|| {
+                format!(
+                    "环境文件改名失败: {} -> {}",
+                    old_path.display(),
+                    new_path.display()
+                )
+            })?;
+            info!(old_id, new_id, "已重命名环境文件");
         }
 
         Ok(())
@@ -144,8 +154,8 @@ mod tests {
 
     fn make_store(dir: &Path) -> ConfigStore {
         ConfigStore {
-            envs_dir: dir.join("envs"),
-            state_file: dir.join("state.json"),
+            envs_dir: dir.join(ENVS_DIR_NAME),
+            state_file: dir.join(STATE_FILE_NAME),
         }
     }
 
@@ -181,7 +191,7 @@ mod tests {
 
     #[test]
     fn test_state_backward_compat() {
-        // Legacy state.json uses a single active_env_id and should still parse and migrate
+        // 旧版 state.json 只有单个 active_env_id，读进来后还能 migrate
         let dir = tempdir().unwrap();
         let store = make_store(dir.path());
         fs::create_dir_all(&store.envs_dir).unwrap();
@@ -196,7 +206,7 @@ mod tests {
         let mut state = store.load_state().unwrap();
         assert_eq!(state.active_env_id, Some("local".to_string()));
 
-        // After migration, local is filtered out (Global is always the fallback, never in active list)
+        // migrate 后 local 会从激活列表剔掉（Current Machine 永远是兜底，不进列表）
         state.migrate();
         assert!(state.active_env_ids.is_empty());
     }
