@@ -8,7 +8,7 @@ hosts 文件管理与切换工具，纯 Rust 实现，无 WebView 依赖，支�
 hostswitch/
 ├── Cargo.toml
 ├── build_macos.sh           # macOS 打包脚本（.app / dmg）
-├── build_windows.sh         # Windows 交叉编译脚本（cargo-xwin）
+├── build_windows.bat        # Windows 构建打包脚本（本机 MSVC）
 └── src/
     ├── main.rs              # 入口；Windows 下识别 --helper 提权助手模式
     ├── app.rs               # 应用主界面与状态管理
@@ -51,11 +51,11 @@ cargo run --release
 ./build_macos.sh
 ./build_macos.sh dmg
 
-# Windows：macOS 上 cargo-xwin 交叉编译单 exe（产物在 dist/）
-./build_windows.sh
+# Windows：本机 MSVC 构建单 exe（产物在 dist/）
+build_windows.bat
 ```
 
-macOS 需安装 Xcode Command Line Tools；Windows 交叉编译需 `brew install llvm`、`rustup target add x86_64-pc-windows-msvc`、`cargo install cargo-xwin`。
+macOS 需安装 Xcode Command Line Tools；Windows 需安装 Rust（msvc target）+ VS Build Tools（"Desktop development with C++" 工作负载，提供 MSVC 链接器与可选签名用的 Windows SDK）。
 
 ## 环境要求
 

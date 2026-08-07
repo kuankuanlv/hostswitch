@@ -102,27 +102,27 @@ impl HostswitchApp {
         }
     }
 
-    /// 是否有后台写入操作正在进行
+    /// 是否有后台写入操作正在进行（UI 冷却用）
     pub fn is_busy(&self) -> bool {
         self.pending_op.is_some()
     }
 
-    /// 在后台线程执行 hosts 写入 + DNS 刷新，避免 UI 卡顿
+    /// 在后台线程写 hosts 并刷新 DNS，避免卡住 UI 帧
     fn start_hosts_write(
         &mut self,
         merged: String,
         rollback: Option<(String, bool)>,
         success: PendingSuccess,
     ) {
+        if self.pending_op.is_some() {
+            return;
+        }
+
         let platform = self.env_manager.platform_handle();
         let (tx, rx) = std::sync::mpsc::channel();
 
         std::thread::spawn(move || {
-            let result = (|| -> anyhow::Result<()> {
-                platform.write_system_hosts(&merged)?;
-                platform.flush_dns_cache()?;
-                Ok(())
-            })();
+            let result = platform.write_system_hosts_and_flush(&merged);
             let _ = tx.send(result);
         });
 
@@ -182,7 +182,6 @@ impl HostswitchApp {
             }
             Some(Ok(Err(e))) => {
                 let op = self.pending_op.take().unwrap();
-                // Write failed: revert activation list to keep state consistent
                 if let Some((env_id, was_active)) = op.rollback {
                     let _ = self.env_manager.rollback_toggle(&env_id, was_active);
                 }
@@ -286,6 +285,7 @@ impl HostswitchApp {
 
     /// 切换环境：勾选启用，取消勾选停用（支持多选）
     pub fn toggle_env(&mut self, env_id: &str) {
+        // 冷却中不接受切换；冷却态由侧栏 UI 展示，这里只做硬闸
         if self.is_busy() {
             return;
         }
@@ -401,6 +401,10 @@ impl HostswitchApp {
         let c = theme_colors(ui.visuals().dark_mode);
         // 处理后台写 hosts 的结果
         self.poll_pending();
+        // 后台写进行中时持续刷帧，及时收结果并排空队列
+        if self.is_busy() {
+            ui.ctx().request_repaint();
+        }
 
         // Cmd+S 保存当前编辑器内容
         if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
@@ -503,6 +507,8 @@ impl HostswitchApp {
                             StatusType::Warning => c.warning,
                         };
                         ui.colored_label(color, &msg.text);
+                    } else if self.is_busy() {
+                        ui.label(egui::RichText::new("Applying…").weak());
                     } else {
                         ui.label(egui::RichText::new("Ready").weak());
                     }
@@ -540,6 +546,7 @@ impl HostswitchApp {
             .collect();
         let selected_id = self.env_manager.selected_env_id().to_string();
         let active_ids = self.env_manager.active_env_ids().to_vec();
+        let toggle_cooling = self.is_busy();
 
         let sidebar_actions = egui::Panel::left("sidebar")
             .default_size(200.0)
@@ -549,7 +556,13 @@ impl HostswitchApp {
                     .inner_margin(Margin::symmetric(10, 10)),
             )
             .show(ui, |ui| {
-                crate::ui::sidebar::sidebar_ui(ui, &envs, &selected_id, &active_ids)
+                crate::ui::sidebar::sidebar_ui(
+                    ui,
+                    &envs,
+                    &selected_id,
+                    &active_ids,
+                    toggle_cooling,
+                )
             })
             .inner;
 

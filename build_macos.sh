@@ -8,42 +8,79 @@
 #   ./build_macos.sh clean     # 清理旧的打包产物
 #
 # 依赖: cargo、codesign（Xcode Command Line Tools）、hdiutil（系统自带）
-# 产物: dist/hostswitch.app / dist/hostswitch.dmg（与 build_windows.sh 的 dist/ 保持一致）
+# 统一产物目录（与 build_windows.bat 一致）: dist/
+#   - dist/hostswitch.app
+#   - dist/hostswitch.dmg（仅 dmg 模式）
 #
 # 说明: ad-hoc 签名（-s -）仅用于本机/内部分发。
-# 公开分发需要 Developer ID 证书 + notarytool 公证，完整步骤：
-#   codesign --force --options runtime --timestamp -s "Developer ID Application: ..." hostswitch.app
-#   codesign --sign "Developer ID Application: ..." --timestamp hostswitch.dmg
-#   xcrun notarytool store-credentials notarytool-profile --apple-id YOU --team-id TEAM --password APP_SPECIFIC
-#   xcrun notarytool submit hostswitch.dmg --keychain-profile notarytool-profile --wait
-#   xcrun stapler staple hostswitch.dmg && spctl -a -vvv hostswitch.dmg
+# 公开分发需要 Developer ID 证书 + notarytool 公证。
 set -euo pipefail
 
 APP_NAME="hostswitch"
 BUNDLE_ID="com.hostswitch.app"
 VERSION="$(grep '^version' Cargo.toml | head -1 | sed 's/^version *= *"\([^"]*\)".*/\1/')"
 ICON="assets/icon.icns"          # 可选：存在则打进 app，否则用默认图标
-LS_MIN_VERSION="11.0"            # 最低 macOS 版本（与 rustc 默认部署目标一致）
+OS_MIN_VERSION="11.0"            # 最低 macOS 版本（与 rustc 默认部署目标一致）
+DIST="dist"
+APP_DIR="${DIST}/${APP_NAME}.app"
+DMG_PATH="${DIST}/${APP_NAME}.dmg"
 
 # 切到仓库根目录（脚本可被任意 cwd 调用）
 cd "$(dirname "$0")"
+ROOT="$(pwd -P)"
+
+wait_to_close() {
+    echo
+    echo "Press Enter to close..."
+    # 非交互环境（管道/CI）不阻塞
+    if [[ -t 0 ]]; then
+        read -r _
+    fi
+}
+
+print_success() {
+    echo
+    echo "========================================"
+    echo " Build succeeded."
+    echo " Output directory:"
+    echo "   ${ROOT}/${DIST}"
+    echo " Artifacts:"
+    for path in "$@"; do
+        if [[ -e "$path" ]]; then
+            echo "   ${ROOT}/${path}"
+        fi
+    done
+    echo "========================================"
+    echo
+}
+
+on_error() {
+    local code=$?
+    echo
+    echo "Build failed (exit ${code}). See messages above."
+    wait_to_close
+    exit "$code"
+}
+trap on_error ERR
 
 clean() {
-    rm -rf "dist/${APP_NAME}.app" \
-           "dist/${APP_NAME}.dmg" \
-           "dist/dmg-staging"
+    rm -rf "${DIST}/${APP_NAME}.app" \
+           "${DIST}/${APP_NAME}.dmg" \
+           "${DIST}/dmg-staging"
 }
 
 if [[ "${1:-}" == "clean" ]]; then
     clean
-    echo "cleaned packaging artifacts"
+    echo
+    echo "cleaned packaging artifacts under: ${ROOT}/${DIST}"
+    echo
+    wait_to_close
     exit 0
 fi
 
 echo "==> cargo build --release"
 cargo build --release
 
-APP_DIR="dist/${APP_NAME}.app"
 CONTENTS="$APP_DIR/Contents"
 
 clean
@@ -84,7 +121,7 @@ cat > "$CONTENTS/Info.plist" <<EOF
     <key>CFBundleVersion</key>
     <string>${VERSION}</string>
     <key>LSMinimumSystemVersion</key>
-    <string>${LS_MIN_VERSION}</string>
+    <string>${OS_MIN_VERSION}</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>LSUIElement</key>
@@ -98,11 +135,11 @@ echo "==> ad-hoc signing (local use)"
 codesign --force --deep -s - "$APP_DIR"
 codesign --verify --deep --strict "$APP_DIR"
 
-echo "==> done: $APP_DIR"
+ARTIFACTS=("$APP_DIR")
 
 if [[ "${1:-}" == "dmg" ]]; then
     echo "==> building dmg"
-    STAGING="dist/dmg-staging"
+    STAGING="${DIST}/dmg-staging"
     rm -rf "$STAGING"
     mkdir -p "$STAGING"
     # ditto 保留 .app 的代码签名和 xattr（cp 不保留）
@@ -113,8 +150,11 @@ if [[ "${1:-}" == "dmg" ]]; then
         -volname "$APP_NAME" \
         -srcfolder "$STAGING" \
         -ov -format UDZO \
-        "dist/${APP_NAME}.dmg"
+        "$DMG_PATH"
 
     rm -rf "$STAGING"
-    echo "==> done: dist/${APP_NAME}.dmg"
+    ARTIFACTS+=("$DMG_PATH")
 fi
+
+print_success "${ARTIFACTS[@]}"
+wait_to_close

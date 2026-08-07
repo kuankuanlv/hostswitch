@@ -2,10 +2,29 @@ use std::collections::VecDeque;
 use std::sync::{LazyLock, Mutex};
 
 use tracing::{Event, Subscriber};
+use tracing_subscriber::prelude::*;
 use tracing_subscriber::Layer;
 
 /// 最多保留的日志条数
 const MAX_LOGS: usize = 500;
+
+/// 初始化全局日志：写临时目录文件（文件名由调用方指定，如主进程/提权助手各自独立）+ UI 缓冲
+pub fn init_global_logging(log_name: &str) -> anyhow::Result<()> {
+    let file = std::fs::File::create(std::env::temp_dir().join(log_name))
+        .map_err(|e| anyhow::anyhow!("create log file {}: {}", log_name, e))?;
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::from_default_env()
+            .add_directive(tracing::Level::DEBUG.into()))
+        .with(LogLayer)
+        .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(file),
+        )
+        .init();
+    Ok(())
+}
 
 /// 全局日志缓冲（供 UI 滚动查看）
 pub static BUFFER: LazyLock<Mutex<VecDeque<String>>> =

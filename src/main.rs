@@ -1,3 +1,10 @@
+// GUI 程序，双击/运行时不让 Windows 弹多余的控制台黑框
+// （日志已写文件，不需要 console 输出；PowerShell 里跑也不再显示日志）
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 mod app;
 mod logs;
 mod model;
@@ -7,33 +14,20 @@ mod storage;
 mod theme;
 mod ui;
 
-#[cfg(target_os = "windows")]
-use std::process::exit;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::prelude::*;
-
 fn main() -> eframe::Result<()> {
-    // 提权助手模式（Windows）：无 UI，处理命令后退出
-    #[cfg(target_os = "windows")]
-    {
-        let args: Vec<String> = std::env::args().collect();
-        if let Some(parent_pid) = platform::win_protocol::parse_helper_args(&args) {
-            match platform::windows::run_helper(parent_pid) {
-                Ok(()) => exit(0),
-                Err(e) => {
-                    eprintln!("helper error: {:#}", e);
-                    exit(1);
-                }
-            }
+    // 子进程helper逻辑
+    let args: Vec<String> = std::env::args().collect();
+    match platform::take_over_entrypoint(&args) {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("platform entrypoint failed: {:#}", e);
+            std::process::exit(1);
         }
     }
 
-    // 初始化日志：控制台输出 + 应用内缓冲（供 Console 窗口查看）
-    tracing_subscriber::registry()
-        .with(EnvFilter::from_default_env().add_directive(tracing::Level::INFO.into()))
-        .with(logs::LogLayer)
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    // 以下为 app 进程：初始化日志（固定文件名）
+    logs::init_global_logging("hostswitch-debug.log").expect("init logging");
 
     tracing::info!("hostswitch starting");
 
@@ -42,6 +36,7 @@ fn main() -> eframe::Result<()> {
             .with_inner_size([800.0, 600.0])
             .with_min_inner_size([600.0, 400.0])
             .with_title("hostswitch"),
+        wgpu_options: platform::wgpu_configuration(),
         ..Default::default()
     };
 
@@ -51,9 +46,6 @@ fn main() -> eframe::Result<()> {
         Box::new(|cc| Ok(Box::new(app::HostswitchApp::new(cc)))),
     );
 
-    // 进程正常退出前：通知提权助手退出（主动撤销，尽力而为；异常退出由 helper 看门狗兜底）
-    #[cfg(target_os = "windows")]
-    platform::windows::shutdown_helper();
-
+    // 主进程退出不通知特殊进程：常驻（空闲超时自动退出），下次启动直接复用免重复授权
     result
 }

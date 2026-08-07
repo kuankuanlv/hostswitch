@@ -18,36 +18,42 @@ pub enum SidebarAction {
     ShowNewEnvDialog,
 }
 
-/// 自定义复选框：勾选时绿色对勾，干净直观
+/// 自定义复选框：勾选时绿色对勾；冷却中半透明且不可点
 struct GreenCheckbox {
     checked: bool,
+    /// hosts 写入进行中：视觉冷却，不响应点击
+    cooling: bool,
 }
 
 impl egui::Widget for GreenCheckbox {
     fn ui(self, ui: &mut egui::Ui) -> egui::Response {
         let c = theme_colors(ui.visuals().dark_mode);
+        let sense = if self.cooling {
+            egui::Sense::hover()
+        } else {
+            egui::Sense::click()
+        };
         // 分配固定 18×18 的可点击区域：统一复选框尺寸，保证各行内布局稳定对齐
-        let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), sense);
 
         // 仅当区域可见时才绘制：滚动场景下跳过屏幕外项，避免无谓的绘制开销
         if ui.is_rect_visible(rect) {
             let painter = ui.painter();
             let rounding = CornerRadius::same(4);
+            let alpha = if self.cooling { 110u8 } else { 255u8 };
 
-            // 背景：勾选时淡绿色底色
-            painter.rect_filled(
-                rect,
-                rounding,
-                if self.checked {
-                    Color32::from_rgba_unmultiplied(74, 222, 128, 26)
-                } else {
-                    Color32::from_rgb(14, 16, 19)
-                },
-            );
+            // 背景：勾选时淡绿色底色；冷却时整体变淡
+            let bg = if self.checked {
+                Color32::from_rgba_unmultiplied(74, 222, 128, if self.cooling { 14 } else { 26 })
+            } else {
+                Color32::from_rgb(14, 16, 19)
+            };
+            painter.rect_filled(rect, rounding, bg);
 
-            // 边框颜色随状态变化：勾选=主题 success 绿，悬停=弱文本色，否则=默认描边
-            let border = if self.checked {
+            // 边框颜色随状态变化：冷却=弱灰，勾选=主题 success 绿，悬停=弱文本色，否则=默认描边
+            let border = if self.cooling {
+                Color32::from_rgba_unmultiplied(c.text_weak.r(), c.text_weak.g(), c.text_weak.b(), alpha)
+            } else if self.checked {
                 c.success
             } else if response.hovered() {
                 c.text_weak
@@ -67,11 +73,21 @@ impl egui::Widget for GreenCheckbox {
                 let p1 = min + egui::vec2(4.0, 9.5);
                 let p2 = min + egui::vec2(7.5, 12.5);
                 let p3 = min + egui::vec2(14.0, 5.5);
-                painter.line_segment([p1, p2], Stroke::new(2.0, c.success));
-                painter.line_segment([p2, p3], Stroke::new(2.0, c.success));
+                let tick = if self.cooling {
+                    Color32::from_rgba_unmultiplied(c.success.r(), c.success.g(), c.success.b(), alpha)
+                } else {
+                    c.success
+                };
+                painter.line_segment([p1, p2], Stroke::new(2.0, tick));
+                painter.line_segment([p2, p3], Stroke::new(2.0, tick));
             }
         }
 
+        let response = if self.cooling {
+            response.on_hover_text("Applying hosts…")
+        } else {
+            response
+        };
         response
     }
 }
@@ -82,6 +98,7 @@ impl egui::Widget for GreenCheckbox {
 /// - `envs`：环境的只读展示数据（id/名称/是否内置）
 /// - `selected_id`：当前选中（编辑）的环境 id
 /// - `active_ids`：当前已激活（启用）的环境 id 列表，支持多选
+/// - `toggle_cooling`：hosts 正在写入时为 true，开关进入冷却（不可点、半透明）
 ///
 /// 返回值：上报用户意图的 `SidebarAction` 列表，由应用层统一执行；
 /// 渲染层只读状态、只产出意图，不直接修改任何应用状态。
@@ -90,9 +107,10 @@ pub fn sidebar_ui(
     envs: &[EnvInfo],
     selected_id: &str,
     active_ids: &[String],
+    toggle_cooling: bool,
 ) -> Vec<SidebarAction> {
-
-    let c = theme_colors(ui.visuals().dark_mode);    let mut actions = Vec::new();
+    let c = theme_colors(ui.visuals().dark_mode);
+    let mut actions = Vec::new();
 
     ui.vertical(|ui| {
         // 顶部标题行：左侧放标题，右侧用 right_to_left 布局把 "+" 新建按钮钉在行尾
@@ -169,8 +187,12 @@ pub fn sidebar_ui(
                             }
                         });
 
-                        // 激活开关：绿色对勾，勾选即启用，支持多选
-                        if ui.add(GreenCheckbox { checked: is_active }).clicked() {
+                        // 激活开关：冷却中只展示、不产生 Toggle 意图
+                        let toggle = ui.add(GreenCheckbox {
+                            checked: is_active,
+                            cooling: toggle_cooling,
+                        });
+                        if !toggle_cooling && toggle.clicked() {
                             actions.push(SidebarAction::ToggleEnv(env.id.clone()));
                         }
                     }

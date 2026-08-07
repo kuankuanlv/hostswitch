@@ -85,17 +85,10 @@ fn decode_text(bytes: &[u8]) -> Option<&str> {
     std::str::from_utf8(&bytes[4..]).ok()
 }
 
-/// 解析 helper 启动参数：`--helper --parent-pid <pid>`
+/// 解析 helper 启动参数：`--helper`
 /// args 为 std::env::args() 的完整收集（含程序名，自动跳过）
-pub fn parse_helper_args(args: &[String]) -> Option<u32> {
-    let mut iter = args.iter().skip(1);
-    if iter.next().map(String::as_str) != Some("--helper") {
-        return None;
-    }
-    if iter.next().map(String::as_str) != Some("--parent-pid") {
-        return None;
-    }
-    iter.next()?.parse().ok()
+pub fn parse_helper_args(args: &[String]) -> bool {
+    args.get(1).map(String::as_str) == Some("--helper")
 }
 
 /// 规范化路径用于比较：统一分隔符、去尾分隔符、小写（Windows 路径语义）
@@ -174,52 +167,20 @@ mod tests {
 
     #[test]
     fn test_parse_helper_args_valid() {
-        let args = vec![
-            "hostswitch.exe".to_string(),
-            "--helper".to_string(),
-            "--parent-pid".to_string(),
-            "4242".to_string(),
-        ];
-        assert_eq!(parse_helper_args(&args), Some(4242));
+        let args = vec!["hostswitch.exe".to_string(), "--helper".to_string()];
+        assert!(parse_helper_args(&args));
     }
 
     #[test]
     fn test_parse_helper_args_missing_flag() {
         let args = vec!["hostswitch.exe".to_string(), "--other".to_string()];
-        assert_eq!(parse_helper_args(&args), None);
+        assert!(!parse_helper_args(&args));
     }
 
     #[test]
-    fn test_parse_helper_args_missing_pid() {
-        let args = vec![
-            "hostswitch.exe".to_string(),
-            "--helper".to_string(),
-            "--parent-pid".to_string(),
-        ];
-        assert_eq!(parse_helper_args(&args), None);
-    }
-
-    #[test]
-    fn test_parse_helper_args_bad_pid() {
-        let args = vec![
-            "hostswitch.exe".to_string(),
-            "--helper".to_string(),
-            "--parent-pid".to_string(),
-            "abc".to_string(),
-        ];
-        assert_eq!(parse_helper_args(&args), None);
-    }
-
-    #[test]
-    fn test_parse_helper_args_extra_args() {
-        let args = vec![
-            "hostswitch.exe".to_string(),
-            "--helper".to_string(),
-            "--parent-pid".to_string(),
-            "7".to_string(),
-            "extra".to_string(),
-        ];
-        assert_eq!(parse_helper_args(&args), Some(7));
+    fn test_parse_helper_args_no_args() {
+        let args = vec!["hostswitch.exe".to_string()];
+        assert!(!parse_helper_args(&args));
     }
 
     #[test]

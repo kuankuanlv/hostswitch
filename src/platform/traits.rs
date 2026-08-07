@@ -11,6 +11,13 @@ pub trait HostsPlatform {
     /// 刷新 DNS 缓存（需要提权）
     fn flush_dns_cache(&self) -> Result<()>;
 
+    /// 写入系统 hosts 并刷新 DNS（默认分两步；Windows 可合并为一次提权/管道往返）
+    fn write_system_hosts_and_flush(&self, content: &str) -> Result<()> {
+        self.write_system_hosts(content)?;
+        self.flush_dns_cache()?;
+        Ok(())
+    }
+
     /// 检查当前进程是否有管理员权限
     fn has_admin_privileges(&self) -> bool;
 
