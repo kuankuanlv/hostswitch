@@ -1,6 +1,6 @@
 # hostswitch：全量 Rust 规范重构 + 系统 hosts 写入冲突检测（乐观锁）
 
-- **状态：⑥ 执行中**（2026-11-08 用户批准执行）
+- **状态：⑦ 已归档**（2026-11-08 完成）
 - **日期**：2026-11-08
 - **来源**：用户 2026-11-08 对话（同意全量重构并一并实现“乐观锁”，要求走 SOP 先出计划）
 - **决策**：14 项待讨论已全部收敛（见 §4.1），用户 2026-11-08 确认
@@ -195,12 +195,12 @@
 
 ### P3 收尾（决策已定）
 
-- [ ] 全量 `cargo fmt`（决策 #2），之后把 `cargo fmt --check` 纳入验证命令；必须放在所有重构之后单独一步。
-- [ ] 老注释规范化 A2（决策 #3）：12 处反引号/箭头/Markdown 去掉；本地约定/外部产品引用（「Pattern C」「SwitchHosts 同款」「QEMU 无 GPU」「便于本机单测」「对齐 macOS marker 校验语义」等）改写为“代码本身在做什么”，逐条列 diff；不删信息、不改业务语义。
-- [ ] 可见性收紧（行为不变）：`ui::run`、`UiError::new` 改 `pub(super)`/`pub(crate)`；`HostswitchApp` 只被 `handle`/`tick` 外部调用的 7 个方法可改私有（外部实现层只调 `backend.handle` 与 `tick`）。
-- [ ] 重复文案收敛（可选）：`format!("{}: {}", 字面量, ...)` 统一成 `fail_status()` 小助手；`"Current Machine"` 常量随 C5 落地。
-- [ ] 主题 token 修正（决策 #13，独立任务）：sidebar/顶栏/状态栏硬编码配色改 `ThemeColors` token；若浅色 token 缺对应色值则补字段；改完交你在浅色主题下确认观感。
-- [ ] 文档归档：全量测试 → `git mv` 计划到 `archive/` → 更新 `archive/README.md` 与总表 → ⑦。
+- [x] 全量 `cargo fmt`（决策 #2），之后把 `cargo fmt --check` 纳入验证命令；必须放在所有重构之后单独一步。
+- [x] 老注释规范化 A2（决策 #3）：12 处反引号/箭头/Markdown 去掉；本地约定/外部产品引用（「Pattern C」「SwitchHosts 同款」「QEMU 无 GPU」「便于本机单测」「对齐 macOS marker 校验语义」等）改写为“代码本身在做什么”，逐条列 diff；不删信息、不改业务语义。
+- [x] 可见性收紧（行为不变）：`ui::run`、`UiError::new` 改 `pub(super)`/`pub(crate)`；`HostswitchApp` 只被 `handle`/`tick` 外部调用的 7 个方法可改私有（外部实现层只调 `backend.handle` 与 `tick`）。
+- [x] 重复文案收敛（可选）：`format!("{}: {}", 字面量, ...)` 统一成 `fail_status()` 小助手；`"Current Machine"` 常量随 C5 落地。
+- [x] 主题 token 修正（决策 #13，独立任务）：sidebar/顶栏/状态栏硬编码配色改 `ThemeColors` token；若浅色 token 缺对应色值则补字段；改完交你在浅色主题下确认观感。
+- [x] 文档归档：全量测试 → `git mv` 计划到 `archive/` → 更新 `archive/README.md` 与总表 → ⑦。
 
 ## 9. 自检结论
 

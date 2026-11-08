@@ -38,6 +38,14 @@ hostswitch/
     └── <env_id>        # 用户自建环境
 ```
 
+## 行为说明
+
+- 系统 hosts = 内置 Current Machine 正文垫底 + 当前激活环境依次追加；只有目标内容与系统现状不一致时才写盘。
+- 保存激活环境或 Current Machine 的正文后自动写盘；保存未激活环境只写环境文件，不动系统 hosts。
+- 启动时若系统 hosts 与激活集合不一致，只提示并等待手动 Apply，不自动覆盖。
+- 写盘前会比对上次确认过的系统 hosts 内容：若被其他程序改过，不自动覆盖，底栏按钮变为 Overwrite，确认后才写。
+- 写盘失败时：启停操作回滚激活状态；正文保存不回滚（编辑内容不丢），底栏报错后可重试。
+
 ## 关于权限
 
 写系统 hosts、刷 DNS 需要管理员权限。设计是：**平时普通权限跑 UI**，真正写盘时再提权；提权后复用高权限的子进程，未设计成直接管理员权限。
@@ -63,7 +71,7 @@ hostswitch/
   2. 首次写 hosts / flush DNS 时，`runas` 弹 UAC；用户同意后 helper 常驻监听管道
   3. 之后同会话内复用已有 helper，**不再弹 UAC**
   4. helper 空闲一段时间会自己退出，下次写盘再拉起（再弹一次 UAC）
-- 护栏：helper 只接受约定协议（如 APPLY / FLUSH_DNS）；写目标限制为系统 hosts 路径
+- 护栏：helper 只接受约定协议（如 APPLY / FLUSH_DNS）；写目标固定为系统 hosts 路径，来源只接受系统临时目录下的 hostswitch 临时文件
 - DNS：优先进程内 `DnsFlushResolverCache`，避免弹出 `ipconfig` 黑窗
 - 实现位置：`src/platform/windows.rs`、`src/platform/win_protocol.rs`；入口分流在 `platform::take_over_entrypoint`
 
