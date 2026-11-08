@@ -135,7 +135,9 @@ fn draw_frame(ui: &mut egui::Ui, app: &mut HostswitchApp) {
         .show_separator_line(false)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                if let Some(msg) = &app.status_message {
+                if app.is_busy() {
+                    ui.label(egui::RichText::new("Applying…").weak());
+                } else if let Some(msg) = &app.status_message {
                     let color = match msg.status_type {
                         StatusType::Info => c.text_weak,
                         StatusType::Success => c.success,
@@ -143,10 +145,14 @@ fn draw_frame(ui: &mut egui::Ui, app: &mut HostswitchApp) {
                         StatusType::Warning => c.warning,
                     };
                     ui.colored_label(color, &msg.text);
-                } else if app.is_busy() {
-                    ui.label(egui::RichText::new("Applying…").weak());
+                } else if app.out_of_sync {
+                    ui.colored_label(c.warning, "System hosts out of sync");
                 } else {
                     ui.label(egui::RichText::new("Ready").weak());
+                }
+
+                if app.out_of_sync && !app.is_busy() && ui.button("Apply").clicked() {
+                    app.handle(UiCommand::ApplyHosts);
                 }
 
                 if app.is_dirty {

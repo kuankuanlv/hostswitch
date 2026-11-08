@@ -10,7 +10,7 @@ use crate::platform::HostsPlatform;
 use crate::storage::ConfigStore;
 
 use super::hosts_merger::HostsMerger;
-use super::hosts_validator::HostsValidator;
+use super::hosts_validator::{HostsValidator, ValidationLevel};
 
 /// 环境管理器：核心业务逻辑
 pub struct EnvManager {
@@ -21,10 +21,16 @@ pub struct EnvManager {
     state: AppState,
 }
 
-/// 激活计划：合并后内容 + 格式警告数（hosts 写入延后到后台执行）
-pub struct ActivationPlan {
-    pub merged: String,
-    pub warning_count: usize,
+/// 同步计划：目标内容要不要写进系统 hosts
+#[derive(Debug)]
+pub enum SyncPlan {
+    /// 目标内容和系统现有内容一致，不需要写盘
+    InSync,
+    /// 需要写入的目标内容；warning_count 是格式警告条数
+    Write {
+        merged: String,
+        warning_count: usize,
+    },
 }
 
 impl EnvManager {
@@ -260,9 +266,7 @@ impl EnvManager {
     }
 
     /// 删除 env（local 不可删）
-    ///
-    /// 返回 Some(merged)：删掉的是激活 env，需要重写系统 hosts（由调用方后台执行）
-    pub fn delete_env(&mut self, env_id: &str) -> Result<Option<String>> {
+    pub fn delete_env(&mut self, env_id: &str) -> Result<()> {
         if env_id == GLOBAL_ENV_ID {
             return Err(anyhow!("cannot delete the built-in local environment"));
         }
@@ -273,10 +277,8 @@ impl EnvManager {
         }
 
         // 如果删除的是激活的 env，从激活列表移除
-        let mut merged = None;
         if self.is_active(env_id) {
             self.state.active_env_ids.retain(|id| id != env_id);
-            merged = Some(self.build_merged()?);
         }
 
         // 如果删除的是当前选中的 env，选中 local
@@ -289,7 +291,7 @@ impl EnvManager {
         self.save_state()?;
 
         info!(env_id, "environment deleted");
-        Ok(merged)
+        Ok(())
     }
 
     /// 重命名 env（local 不可改名）
@@ -361,72 +363,45 @@ impl EnvManager {
 
     // ---------- 启用 env ----------
 
-    /// 启用某个 env：改激活列表 + 生成合并内容（快，不写系统）
-    ///
-    /// 写 /etc/hosts 由调用方放到后台线程执行，避免 UI 卡顿
-    pub fn activate_env(&mut self, env_id: &str) -> Result<ActivationPlan> {
+    /// 启用某个 env：校验正文格式后改激活列表（不写系统 hosts）
+    pub fn activate_env(&mut self, env_id: &str) -> Result<()> {
         info!(env_id, "activating environment");
 
         // Global 恒为兜底，不需要也不能手动启用
         if env_id == GLOBAL_ENV_ID {
-            return Ok(ActivationPlan {
-                merged: self.build_merged()?,
-                warning_count: 0,
-            });
+            return Ok(());
         }
 
-        // 1. 读取 env 内容
+        // 读取正文并校验，格式错误直接拦下
         let env_content = self.store.load_env_content(env_id)?;
-
-        // 2. 格式校验
-        let issues = HostsValidator::validate(&env_content);
-        if HostsValidator::has_errors(&issues) {
-            let error_msgs: Vec<String> = issues
-                .iter()
-                .filter(|i| i.level == super::hosts_validator::ValidationLevel::Error)
-                .map(|i| {
-                    format!(
-                        "line {}: {} - {}",
-                        i.line_number,
-                        i.message,
-                        i.line_content.trim()
-                    )
-                })
-                .collect();
-            warn!(env_id, count = error_msgs.len(), "format validation failed, activation blocked");
-            return Err(anyhow!("format validation failed:\n{}", error_msgs.join("\n")));
+        let (warning_count, errors) = Self::validate_env_content(&env_content);
+        if !errors.is_empty() {
+            warn!(env_id, count = errors.len(), "format validation failed, activation blocked");
+            return Err(anyhow!("format validation failed:\n{}", errors.join("\n")));
         }
-
-        let warning_count = issues
-            .iter()
-            .filter(|i| i.level == super::hosts_validator::ValidationLevel::Warning)
-            .count();
         if warning_count > 0 {
             warn!(env_id, warning_count, "format warnings present but not blocking");
         }
 
-        // 3. 加入激活列表并生成合并内容
         if !self.is_active(env_id) {
             self.state.active_env_ids.push(env_id.to_string());
         }
-        let merged = self.build_merged()?;
         self.save_state()?;
 
-        info!(env_id, "activation plan generated");
-        Ok(ActivationPlan { merged, warning_count })
+        info!(env_id, "activation state updated");
+        Ok(())
     }
 
-    /// 停用某个 env：移出激活列表 + 生成合并内容（快，不写系统）
+    /// 停用某个 env：移出激活列表（不写系统 hosts）
     ///
     /// Global 恒为兜底，即使列表空了也会写入
-    pub fn deactivate_env(&mut self, env_id: &str) -> Result<String> {
+    pub fn deactivate_env(&mut self, env_id: &str) -> Result<()> {
         info!(env_id, "deactivating environment");
 
         self.state.active_env_ids.retain(|id| id != env_id);
-        let merged = self.build_merged()?;
         self.save_state()?;
 
-        Ok(merged)
+        Ok(())
     }
 
     /// 写系统 hosts 失败时，把激活列表改回去
@@ -446,8 +421,26 @@ impl EnvManager {
         self.platform.clone()
     }
 
+    /// 按当前激活集合算出目标内容，和系统现有 hosts 比对，决定要不要写盘
+    pub fn sync_plan(&self) -> Result<SyncPlan> {
+        let current = self.platform.read_system_hosts()?;
+        let merged = self.build_merged()?;
+
+        if merged == current {
+            return Ok(SyncPlan::InSync);
+        }
+
+        let warning_count = self.validate_active_envs()?;
+        Ok(SyncPlan::Write {
+            merged,
+            warning_count,
+        })
+    }
+
+    // ---------- 内部 ----------
+
     /// 生成合并内容（Global 垫底，后面的覆盖前面的）
-    pub fn build_merged(&self) -> Result<String> {
+    fn build_merged(&self) -> Result<String> {
         // 按 envs 列表顺序收集激活环境的内容
         let mut env_contents: Vec<String> = Vec::new();
         for env in &self.envs {
@@ -463,10 +456,297 @@ impl EnvManager {
         Ok(HostsMerger::merge_many(&refs, Some(&local_content)))
     }
 
-    // ---------- 内部 ----------
+    /// 校验所有激活环境的正文，有错误时汇总成一条错误
+    fn validate_active_envs(&self) -> Result<usize> {
+        let mut warning_count = 0;
+        let mut errors = Vec::new();
+
+        for env in &self.envs {
+            if !self.is_active(&env.id) {
+                continue;
+            }
+            let content = self.store.load_env_content(&env.id)?;
+            let (warnings, env_errors) = Self::validate_env_content(&content);
+            warning_count += warnings;
+            errors.extend(
+                env_errors
+                    .into_iter()
+                    .map(|message| format!("{}: {}", env.id, message)),
+            );
+        }
+
+        if !errors.is_empty() {
+            return Err(anyhow!("format validation failed:\n{}", errors.join("\n")));
+        }
+
+        Ok(warning_count)
+    }
+
+    /// 校验单个环境的正文，返回（警告数，错误描述）
+    fn validate_env_content(content: &str) -> (usize, Vec<String>) {
+        let issues = HostsValidator::validate(content);
+        let warnings = issues
+            .iter()
+            .filter(|issue| issue.level == ValidationLevel::Warning)
+            .count();
+
+        if !HostsValidator::has_errors(&issues) {
+            return (warnings, Vec::new());
+        }
+
+        let errors = issues
+            .iter()
+            .filter(|issue| issue.level == ValidationLevel::Error)
+            .map(|issue| {
+                format!(
+                    "line {}: {} - {}",
+                    issue.line_number,
+                    issue.message,
+                    issue.line_content.trim()
+                )
+            })
+            .collect();
+
+        (warnings, errors)
+    }
 
     /// 保存 state
     fn save_state(&self) -> Result<()> {
         self.store.save_state(&self.state)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::sync::Mutex;
+
+    use super::*;
+    use crate::model::AppState;
+    use crate::platform::HostsPlatform;
+    use crate::storage::ConfigStore;
+    use tempfile::tempdir;
+
+    const LOCAL_CONTENT: &str = "127.0.0.1\tlocalhost";
+
+    /// 可控平台：系统 hosts 内容固定，写盘直接成功不落盘
+    struct FakePlatform {
+        system_hosts: Mutex<String>,
+    }
+
+    impl FakePlatform {
+        fn new(system_hosts: &str) -> Self {
+            Self {
+                system_hosts: Mutex::new(system_hosts.to_string()),
+            }
+        }
+    }
+
+    impl HostsPlatform for FakePlatform {
+        fn read_system_hosts(&self) -> Result<String> {
+            let system_hosts = self
+                .system_hosts
+                .lock()
+                .map_err(|_| anyhow::anyhow!("fake platform mutex error"))?;
+            Ok(system_hosts.clone())
+        }
+
+        fn write_system_hosts(&self, _content: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn flush_dns_cache(&self) -> Result<()> {
+            Ok(())
+        }
+
+        fn has_admin_privileges(&self) -> bool {
+            false
+        }
+
+        fn ensure_elevated(&self) -> Result<()> {
+            Ok(())
+        }
+
+        fn hosts_file_path(&self) -> &str {
+            "/etc/hosts"
+        }
+    }
+
+    /// 准备一个带 local 与若干用户环境的 EnvManager
+    fn make_manager(
+        dir: &Path,
+        envs: &[(&str, &str)],
+        active: &[&str],
+        system_hosts: &str,
+    ) -> EnvManager {
+        let store = ConfigStore {
+            envs_dir: dir.join("envs"),
+            state_file: dir.join("state.json"),
+        };
+        std::fs::create_dir_all(&store.envs_dir).unwrap();
+        store.save_env_content(GLOBAL_ENV_ID, LOCAL_CONTENT).unwrap();
+        for (env_id, content) in envs {
+            store.save_env_content(env_id, content).unwrap();
+        }
+
+        let state = AppState {
+            active_env_ids: active.iter().map(|id| id.to_string()).collect(),
+            selected_env_id: GLOBAL_ENV_ID.to_string(),
+            ..Default::default()
+        };
+        store.save_state(&state).unwrap();
+
+        EnvManager::new(store, Box::new(FakePlatform::new(system_hosts))).unwrap()
+    }
+
+    fn merged_of(envs: &[&str]) -> String {
+        HostsMerger::merge_many(envs, Some(LOCAL_CONTENT))
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum PlanKind {
+        InSync,
+        Write,
+        Error,
+    }
+
+    /// 一条 sync_plan 用例：怎么准备环境、做什么动作、期望结果
+    struct SyncCase {
+        name: &'static str,
+        setup: fn(&Path) -> EnvManager,
+        action: fn(&mut EnvManager),
+        expected: PlanKind,
+    }
+
+    const ACTIVE_DEV_HOSTS: &str = "10.0.0.1 host-a";
+
+    fn merged_active_dev() -> String {
+        merged_of(&[ACTIVE_DEV_HOSTS])
+    }
+
+    fn setup_no_active_env(dir: &Path) -> EnvManager {
+        make_manager(dir, &[], &[], &merged_of(&[]))
+    }
+
+    fn setup_inactive_dev(dir: &Path) -> EnvManager {
+        make_manager(dir, &[("dev", ACTIVE_DEV_HOSTS)], &[], &merged_of(&[]))
+    }
+
+    fn setup_active_dev(dir: &Path) -> EnvManager {
+        make_manager(
+            dir,
+            &[("dev", ACTIVE_DEV_HOSTS)],
+            &["dev"],
+            &merged_active_dev(),
+        )
+    }
+
+    fn setup_active_dev_with_other(dir: &Path) -> EnvManager {
+        make_manager(
+            dir,
+            &[("dev", ACTIVE_DEV_HOSTS), ("other", "10.0.0.9 host-c")],
+            &["dev"],
+            &merged_active_dev(),
+        )
+    }
+
+    fn no_action(_: &mut EnvManager) {}
+
+    fn activate_dev(manager: &mut EnvManager) {
+        manager.activate_env("dev").unwrap();
+    }
+
+    fn save_active_dev_content(manager: &mut EnvManager) {
+        manager.save_env_content("dev", "10.0.0.2 host-b").unwrap();
+    }
+
+    fn save_inactive_env_content(manager: &mut EnvManager) {
+        manager.save_env_content("other", "10.0.0.8 host-d").unwrap();
+    }
+
+    fn save_invalid_active_content(manager: &mut EnvManager) {
+        manager.save_env_content("dev", "not-an-ip host-a").unwrap();
+    }
+
+    fn delete_active_dev(manager: &mut EnvManager) {
+        manager.delete_env("dev").unwrap();
+    }
+
+    fn sync_cases() -> [SyncCase; 6] {
+        [
+            SyncCase {
+                name: "没有激活环境且系统 hosts 一致",
+                setup: setup_no_active_env,
+                action: no_action,
+                expected: PlanKind::InSync,
+            },
+            SyncCase {
+                name: "启用环境后需要写盘",
+                setup: setup_inactive_dev,
+                action: activate_dev,
+                expected: PlanKind::Write,
+            },
+            SyncCase {
+                name: "保存激活环境的新内容后需要写盘",
+                setup: setup_active_dev,
+                action: save_active_dev_content,
+                expected: PlanKind::Write,
+            },
+            SyncCase {
+                name: "保存未激活环境内容后保持一致",
+                setup: setup_active_dev_with_other,
+                action: save_inactive_env_content,
+                expected: PlanKind::InSync,
+            },
+            SyncCase {
+                name: "删除激活环境后需要写盘",
+                setup: setup_active_dev,
+                action: delete_active_dev,
+                expected: PlanKind::Write,
+            },
+            SyncCase {
+                name: "激活环境内容格式非法时报错",
+                setup: setup_active_dev,
+                action: save_invalid_active_content,
+                expected: PlanKind::Error,
+            },
+        ]
+    }
+
+    #[test]
+    fn test_sync_plan_returns_expected_plan() {
+        for case in sync_cases() {
+            let dir = tempdir().unwrap();
+            let mut manager = (case.setup)(dir.path());
+            (case.action)(&mut manager);
+            let actual = match manager.sync_plan() {
+                Ok(SyncPlan::InSync) => PlanKind::InSync,
+                Ok(SyncPlan::Write { .. }) => PlanKind::Write,
+                Err(_) => PlanKind::Error,
+            };
+            assert_eq!(actual, case.expected, "case: {}", case.name);
+        }
+    }
+
+    #[test]
+    fn test_sync_plan_merged_contains_saved_content() {
+        let dir = tempdir().unwrap();
+        let mut manager = setup_active_dev(dir.path());
+        save_active_dev_content(&mut manager);
+
+        let Ok(SyncPlan::Write { merged, .. }) = manager.sync_plan() else {
+            panic!("saving active env content should change target hosts");
+        };
+        assert!(merged.contains("10.0.0.2 host-b"), "merged: {merged}");
+    }
+
+    #[test]
+    fn test_sync_plan_invalid_content_reports_env() {
+        let dir = tempdir().unwrap();
+        let mut manager = setup_active_dev(dir.path());
+        save_invalid_active_content(&mut manager);
+
+        let error = manager.sync_plan().unwrap_err().to_string();
+        assert!(error.contains("dev: line 1"), "error: {error}");
     }
 }
