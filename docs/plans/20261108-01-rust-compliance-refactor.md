@@ -187,11 +187,11 @@
 
 ### P2 乐观锁（行为变更，独立一批）
 
-- [ ] `env_manager.rs`：加 `system_hosts_baseline`、`sync_plan(&mut self)` 返回 `system_changed`、`confirm_system_hosts`；补 3 条单测（FakePlatform 共享 `Arc<Mutex<String>>`）。
-- [ ] `app.rs`：`PendingOp.written`、`conflict`、`force` 贯通（request/try/deferred）、成功回填基线、冲突提示。
-- [ ] `egui/mod.rs`：底栏 `Apply`/`Overwrite` 文案 + 冲突提示。
-- [ ] `README.md`：补充“保存激活环境即应用、外部修改需确认覆盖”的说明（待讨论 #6 决定）。
-- [ ] 验收：`cargo check && cargo test`；真机步骤：手动往 `/etc/hosts` 加一行 → 改 `dev` 条目保存 → 应提示冲突且不写盘 → 点 Overwrite → 弹一次授权并写入。
+- [x] `env_manager.rs`：加 `system_hosts_baseline`、`sync_plan(&mut self)` 返回 `system_changed`、`confirm_system_hosts`；补 3 条单测（FakePlatform 共享 `Arc<Mutex<String>>`）。
+- [x] `app.rs`：`PendingOp.written`、`conflict`、`force` 贯通（request/try/deferred）、成功回填基线、冲突提示。
+- [x] `egui/mod.rs`：底栏 `Apply`/`Overwrite` 文案 + 冲突提示。
+- [x] `README.md`：补充“保存激活环境即应用、外部修改需确认覆盖”的说明（待讨论 #6 决定）。
+- [x] 验收：`cargo check && cargo test`；真机步骤：手动往 `/etc/hosts` 加一行 → 改 `dev` 条目保存 → 应提示冲突且不写盘 → 点 Overwrite → 弹一次授权并写入。
 
 ### P3 收尾（决策已定）
 

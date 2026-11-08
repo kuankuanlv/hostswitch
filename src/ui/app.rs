@@ -68,6 +68,8 @@ pub struct HostswitchApp {
     pub show_console: bool,
     /// 系统 hosts 和当前激活集合是否不一致（底栏提示，可手动 Apply）
     pub out_of_sync: bool,
+    /// 系统 hosts 被外部程序改过，需用户点 Overwrite 确认覆盖
+    pub conflict: bool,
     /// 后台写系统 hosts 的在途任务；有值表示冷却中
     pending_op: Option<PendingOp>,
     /// 写盘在途时攒下的同步请求，写完再补一次
@@ -87,6 +89,8 @@ enum PendingSuccess {
 struct DeferredSync {
     success: PendingSuccess,
     rollback: Option<(String, bool)>,
+    /// 用户已确认覆盖外部修改
+    force: bool,
 }
 
 /// 一次后台写 hosts：结果通道 + 失败回滚线索 + 成功提示 + 格式警告数
@@ -97,6 +101,8 @@ struct PendingOp {
     success: PendingSuccess,
     /// 参与合并的内容有几条格式警告
     warning_count: usize,
+    /// 本次写入的内容，成功后作为系统 hosts 基线
+    written: String,
 }
 
 impl HostswitchApp {
@@ -119,6 +125,7 @@ impl HostswitchApp {
             new_env_name: String::new(),
             show_console: false,
             out_of_sync: false,
+            conflict: false,
             pending_op: None,
             deferred_sync: None,
         };
@@ -213,7 +220,7 @@ impl HostswitchApp {
 
                 // local 垫底、激活环境参与合并，其余环境只影响自己的文件
                 if env_id == GLOBAL_ENV_ID || self.env_manager.is_active(&env_id) {
-                    self.request_sync(PendingSuccess::Save, None);
+                    self.request_sync(PendingSuccess::Save, None, false);
                 } else {
                     self.set_status("Saved", StatusType::Success);
                 }
@@ -262,7 +269,7 @@ impl HostswitchApp {
         match self.env_manager.delete_env(env_id) {
             Ok(_) => {
                 self.switch_env(GLOBAL_ENV_ID);
-                self.request_sync(PendingSuccess::Deleted(env_id.to_string()), None);
+                self.request_sync(PendingSuccess::Deleted(env_id.to_string()), None, false);
             }
             Err(e) => {
                 self.set_status(format!("{}: {}", "Delete failed", e), StatusType::Error);
@@ -276,7 +283,7 @@ impl HostswitchApp {
             return;
         }
 
-        self.request_sync(PendingSuccess::Applied, None);
+        self.request_sync(PendingSuccess::Applied, None, true);
     }
 
     /// 停用一个环境：先改激活集合，写盘失败时回滚
@@ -287,6 +294,7 @@ impl HostswitchApp {
                 self.request_sync(
                     PendingSuccess::Deactivate(env_id.to_string()),
                     Some((env_id.to_string(), true)),
+                    false,
                 );
             }
             Err(e) => {
@@ -307,6 +315,7 @@ impl HostswitchApp {
                 self.request_sync(
                     PendingSuccess::Activate(env_id.to_string()),
                     Some((env_id.to_string(), false)),
+                    false,
                 );
             }
             Err(e) => {
@@ -320,9 +329,11 @@ impl HostswitchApp {
         match self.env_manager.sync_plan() {
             Ok(SyncPlan::InSync) => {
                 self.out_of_sync = false;
+                self.conflict = false;
             }
             Ok(SyncPlan::Write { .. }) => {
                 self.out_of_sync = true;
+                self.conflict = false;
                 self.set_status("System hosts out of sync", StatusType::Warning);
             }
             Err(e) => {
@@ -333,27 +344,52 @@ impl HostswitchApp {
     }
 
     /// 请求把当前激活集合同步到系统 hosts：在途就攒着，写完再补一次
-    fn request_sync(&mut self, success: PendingSuccess, rollback: Option<(String, bool)>) {
+    fn request_sync(
+        &mut self,
+        success: PendingSuccess,
+        rollback: Option<(String, bool)>,
+        force: bool,
+    ) {
         if self.pending_op.is_some() {
-            self.deferred_sync = Some(DeferredSync { success, rollback });
+            self.deferred_sync = Some(DeferredSync {
+                success,
+                rollback,
+                force,
+            });
             return;
         }
 
-        self.try_sync(success, rollback);
+        self.try_sync(success, rollback, force);
     }
 
     /// 算一次目标内容，和系统现有 hosts 比对；不同才起后台写盘
-    fn try_sync(&mut self, success: PendingSuccess, rollback: Option<(String, bool)>) {
+    fn try_sync(
+        &mut self,
+        success: PendingSuccess,
+        rollback: Option<(String, bool)>,
+        force: bool,
+    ) {
         match self.env_manager.sync_plan() {
             Ok(SyncPlan::InSync) => {
                 self.out_of_sync = false;
+                self.conflict = false;
                 self.finish_success(success, 0, false);
             }
             Ok(SyncPlan::Write {
                 merged,
                 warning_count,
+                system_changed,
             }) => {
                 self.out_of_sync = true;
+                if system_changed && !force {
+                    self.conflict = true;
+                    self.set_status(
+                        "System hosts changed externally: click Overwrite to replace",
+                        StatusType::Warning,
+                    );
+                    return;
+                }
+                self.conflict = false;
                 self.start_hosts_write(merged, rollback, success, warning_count);
             }
             Err(e) => {
@@ -373,7 +409,7 @@ impl HostswitchApp {
             return;
         };
 
-        self.try_sync(request.success, request.rollback);
+        self.try_sync(request.success, request.rollback, request.force);
     }
 
     /// 后台线程写合并后的 hosts；已有在途任务则直接丢弃（调用方已挡住）
@@ -389,6 +425,7 @@ impl HostswitchApp {
         }
 
         let platform = self.env_manager.platform_handle();
+        let written = merged.clone();
         let (tx, rx) = std::sync::mpsc::channel();
 
         std::thread::spawn(move || {
@@ -401,6 +438,7 @@ impl HostswitchApp {
             rollback,
             success,
             warning_count,
+            written,
         });
     }
 
@@ -414,6 +452,8 @@ impl HostswitchApp {
                     return;
                 };
                 self.out_of_sync = false;
+                self.conflict = false;
+                self.env_manager.confirm_system_hosts(&op.written);
                 self.finish_success(op.success, op.warning_count, true);
             }
             Some(Ok(Err(e))) => {

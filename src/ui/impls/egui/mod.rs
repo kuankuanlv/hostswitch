@@ -162,8 +162,11 @@ fn draw_status_bar(ui: &mut egui::Ui, app: &mut HostswitchApp, c: &ThemeColors) 
             ui.horizontal(|ui| {
                 draw_status_text(ui, &*app, c);
 
-                if app.out_of_sync && !app.is_busy() && ui.button("Apply").clicked() {
-                    app.handle(UiCommand::ApplyHosts);
+                if app.out_of_sync && !app.is_busy() {
+                    let label = if app.conflict { "Overwrite" } else { "Apply" };
+                    if ui.button(label).clicked() {
+                        app.handle(UiCommand::ApplyHosts);
+                    }
                 }
 
                 if app.is_dirty {
@@ -185,6 +188,8 @@ fn draw_status_text(ui: &mut egui::Ui, app: &HostswitchApp, c: &ThemeColors) {
             StatusType::Warning => c.warning,
         };
         ui.colored_label(color, &msg.text);
+    } else if app.conflict {
+        ui.colored_label(c.warning, "System hosts changed externally");
     } else if app.out_of_sync {
         ui.colored_label(c.warning, "System hosts out of sync");
     } else {

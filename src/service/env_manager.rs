@@ -20,6 +20,8 @@ pub struct EnvManager {
     platform: Arc<dyn HostsPlatform + Send + Sync>,
     envs: Vec<Env>,
     state: AppState,
+    /// 上次确认过的系统 hosts 内容，用来发现被外部程序改过
+    system_hosts_baseline: Option<String>,
 }
 
 /// 同步计划：目标内容要不要写进系统 hosts
@@ -31,6 +33,8 @@ pub enum SyncPlan {
     Write {
         merged: String,
         warning_count: usize,
+        /// 系统 hosts 在本次进程确认之后被外部改过
+        system_changed: bool,
     },
 }
 
@@ -46,10 +50,12 @@ impl EnvManager {
             platform: Arc::from(platform),
             envs: Vec::new(),
             state,
+            system_hosts_baseline: None,
         };
 
         manager.load_envs()?;
         manager.ensure_local_env()?;
+        manager.system_hosts_baseline = manager.platform.read_system_hosts().ok();
 
         debug!(
             hosts_path = manager.platform.hosts_file_path(),
@@ -229,19 +235,32 @@ impl EnvManager {
     }
 
     /// 按当前激活集合算出目标内容，和系统现有 hosts 比对，决定要不要写盘
-    pub fn sync_plan(&self) -> Result<SyncPlan> {
+    pub fn sync_plan(&mut self) -> Result<SyncPlan> {
         let current = self.platform.read_system_hosts()?;
         let merged = self.build_merged()?;
 
         if merged == current {
+            // 内容已一致：顺带确认基线，避免之后误报外部修改
+            self.system_hosts_baseline = Some(current);
             return Ok(SyncPlan::InSync);
         }
 
         let warning_count = self.validate_active_envs()?;
+        let system_changed = self
+            .system_hosts_baseline
+            .as_deref()
+            .map(|baseline| baseline != current)
+            .unwrap_or(false);
         Ok(SyncPlan::Write {
             merged,
             warning_count,
+            system_changed,
         })
+    }
+
+    /// 写盘成功后记录基线，下次据此判断系统 hosts 是否被外部改动
+    pub fn confirm_system_hosts(&mut self, content: &str) {
+        self.system_hosts_baseline = Some(content.to_string());
     }
 
     // ---------- 内部 ----------
@@ -461,7 +480,7 @@ impl EnvManager {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use super::*;
     use crate::model::AppState;
@@ -473,14 +492,12 @@ mod tests {
 
     /// 可控平台：系统 hosts 内容固定，写盘直接成功不落盘
     struct FakePlatform {
-        system_hosts: Mutex<String>,
+        system_hosts: Arc<Mutex<String>>,
     }
 
     impl FakePlatform {
-        fn new(system_hosts: &str) -> Self {
-            Self {
-                system_hosts: Mutex::new(system_hosts.to_string()),
-            }
+        fn new(system_hosts: Arc<Mutex<String>>) -> Self {
+            Self { system_hosts }
         }
     }
 
@@ -514,13 +531,13 @@ mod tests {
         }
     }
 
-    /// 准备一个带 local 与若干用户环境的 EnvManager
-    fn make_manager(
+    /// 准备一个带 local 与若干用户环境的 EnvManager，并返回可改写的系统 hosts 句柄
+    fn make_manager_with_system(
         dir: &Path,
         envs: &[(&str, &str)],
         active: &[&str],
         system_hosts: &str,
-    ) -> EnvManager {
+    ) -> (EnvManager, Arc<Mutex<String>>) {
         let store = ConfigStore {
             envs_dir: dir.join("envs"),
             state_file: dir.join("state.json"),
@@ -538,7 +555,20 @@ mod tests {
         };
         store.save_state(&state).unwrap();
 
-        EnvManager::new(store, Box::new(FakePlatform::new(system_hosts))).unwrap()
+        let system_hosts = Arc::new(Mutex::new(system_hosts.to_string()));
+        let platform = FakePlatform::new(system_hosts.clone());
+        let manager = EnvManager::new(store, Box::new(platform)).unwrap();
+        (manager, system_hosts)
+    }
+
+    /// 准备一个带 local 与若干用户环境的 EnvManager
+    fn make_manager(
+        dir: &Path,
+        envs: &[(&str, &str)],
+        active: &[&str],
+        system_hosts: &str,
+    ) -> EnvManager {
+        make_manager_with_system(dir, envs, active, system_hosts).0
     }
 
     fn merged_of(envs: &[&str]) -> String {
@@ -688,5 +718,69 @@ mod tests {
 
         let error = manager.sync_plan().unwrap_err().to_string();
         assert!(error.contains("dev: line 1"), "error: {error}");
+    }
+
+    #[test]
+    fn test_sync_plan_external_change_returns_system_changed() {
+        let dir = tempdir().unwrap();
+        let (mut manager, system) = make_manager_with_system(
+            dir.path(),
+            &[("dev", ACTIVE_DEV_HOSTS)],
+            &["dev"],
+            &merged_active_dev(),
+        );
+        assert!(matches!(manager.sync_plan().unwrap(), SyncPlan::InSync));
+
+        *system.lock().unwrap() = "198.51.100.9 external\n".to_string();
+        match manager.sync_plan().unwrap() {
+            SyncPlan::Write {
+                system_changed, ..
+            } => assert!(system_changed),
+            SyncPlan::InSync => panic!("external change should require write"),
+        }
+    }
+
+    #[test]
+    fn test_sync_plan_confirmed_baseline_matches_external_content() {
+        let dir = tempdir().unwrap();
+        let (mut manager, system) = make_manager_with_system(
+            dir.path(),
+            &[("dev", ACTIVE_DEV_HOSTS)],
+            &["dev"],
+            &merged_active_dev(),
+        );
+        let external = "198.51.100.9 external\n".to_string();
+        *system.lock().unwrap() = external.clone();
+
+        manager.confirm_system_hosts(&external);
+        match manager.sync_plan().unwrap() {
+            SyncPlan::Write {
+                system_changed, ..
+            } => assert!(!system_changed),
+            SyncPlan::InSync => panic!("desired differs from external content"),
+        }
+    }
+
+    #[test]
+    fn test_sync_plan_in_sync_refreshes_baseline() {
+        let dir = tempdir().unwrap();
+        let (mut manager, system) = make_manager_with_system(
+            dir.path(),
+            &[("dev", ACTIVE_DEV_HOSTS)],
+            &["dev"],
+            &merged_active_dev(),
+        );
+
+        // 基线是旧内容时，内容一致的观察应把它刷新为当前内容
+        manager.confirm_system_hosts("stale baseline");
+        assert!(matches!(manager.sync_plan().unwrap(), SyncPlan::InSync));
+
+        *system.lock().unwrap() = "198.51.100.9 external\n".to_string();
+        match manager.sync_plan().unwrap() {
+            SyncPlan::Write {
+                system_changed, ..
+            } => assert!(system_changed),
+            SyncPlan::InSync => panic!("external change should require write"),
+        }
     }
 }
