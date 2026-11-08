@@ -10,10 +10,13 @@ use eframe::egui;
 use egui::{Color32, Margin, Stroke};
 
 use crate::model::GLOBAL_ENV_ID;
+use crate::ui::UiError;
 use crate::ui::app::{HostswitchApp, StatusType, UiCommand};
-use crate::ui::{CURRENT_MACHINE_NAME, UiError};
 
 use self::theme::{ThemeColors, theme_colors};
+
+/// 内置环境的显示名（各平台统一）
+const BUILTIN_ENV_NAME: &str = "hosts";
 
 /// 启动 egui 原生窗口
 pub(super) fn run(
@@ -147,9 +150,9 @@ fn draw_top_actions(ui: &mut egui::Ui, app: &mut HostswitchApp) {
 fn active_env_summary(app: &HostswitchApp) -> String {
     let active_list = app.env_manager.active_env_ids();
     if active_list.is_empty() {
-        CURRENT_MACHINE_NAME.to_string()
+        BUILTIN_ENV_NAME.to_string()
     } else {
-        format!("{}, {}", CURRENT_MACHINE_NAME, active_list.join(", "))
+        format!("{}, {}", BUILTIN_ENV_NAME, active_list.join(", "))
     }
 }
 
@@ -162,11 +165,9 @@ fn draw_status_bar(ui: &mut egui::Ui, app: &mut HostswitchApp, c: &ThemeColors) 
             ui.horizontal(|ui| {
                 draw_status_text(ui, &*app, c);
 
-                if app.out_of_sync && !app.is_busy() {
-                    let label = if app.conflict { "Overwrite" } else { "Apply" };
-                    if ui.button(label).clicked() {
-                        app.handle(UiCommand::ApplyHosts);
-                    }
+                // 启动漂移只提示，不提供 Apply；外部修改才需要 Overwrite 确认
+                if app.conflict && !app.is_busy() && ui.button("Overwrite").clicked() {
+                    app.handle(UiCommand::ApplyHosts);
                 }
 
                 if app.is_dirty {
@@ -223,7 +224,11 @@ fn draw_sidebar_panel(ui: &mut egui::Ui, app: &mut HostswitchApp, c: &ThemeColor
         .iter()
         .map(|e| sidebar::EnvInfo {
             id: e.id.clone(),
-            name: e.name.clone(),
+            name: if e.is_builtin {
+                BUILTIN_ENV_NAME.to_string()
+            } else {
+                e.name.clone()
+            },
             is_builtin: e.is_builtin,
         })
         .collect();
@@ -259,6 +264,7 @@ fn draw_editor_panel(ui: &mut egui::Ui, app: &mut HostswitchApp) {
     let editor_env_name = editor_env_name(app, &editor_env_id);
     let is_active = app.env_manager.is_active(&editor_env_id);
     let is_dirty = app.is_dirty;
+    let read_only = editor_env_id == GLOBAL_ENV_ID;
 
     let (changed, editor_action) = egui::CentralPanel::default()
         .show(ui, |ui| {
@@ -268,6 +274,7 @@ fn draw_editor_panel(ui: &mut egui::Ui, app: &mut HostswitchApp) {
                 &mut app.current_content,
                 is_active,
                 is_dirty,
+                read_only,
             )
         })
         .inner;
@@ -283,7 +290,7 @@ fn draw_editor_panel(ui: &mut egui::Ui, app: &mut HostswitchApp) {
 /// 编辑器标题显示的环境名
 fn editor_env_name(app: &HostswitchApp, editor_env_id: &str) -> String {
     if editor_env_id == GLOBAL_ENV_ID {
-        CURRENT_MACHINE_NAME.to_string()
+        BUILTIN_ENV_NAME.to_string()
     } else {
         app.env_manager
             .get_env(editor_env_id)

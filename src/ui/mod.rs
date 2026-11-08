@@ -3,9 +3,6 @@
 mod app;
 mod impls;
 
-/// 内置环境（local）的对外显示名
-pub(crate) const CURRENT_MACHINE_NAME: &str = "Current Machine";
-
 /// UI 运行期错误（对 main 隐藏具体库错误类型）
 #[derive(Debug)]
 pub struct UiError {

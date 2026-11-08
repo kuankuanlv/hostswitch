@@ -229,14 +229,13 @@ fn draw_row_button(
     actions: &mut Vec<SidebarAction>,
 ) -> egui::Response {
     // 宽度占满可用宽度并预留 80px 给复选框，避免行被挤窄
-    let response = ui.add(
-        egui::Button::selectable(
-            is_selected,
-            egui::RichText::new(env_display_name(env)).size(14.0),
+    let response = ui
+        .add(
+            egui::Button::selectable(is_selected, egui::RichText::new(&env.name).size(14.0))
+                .min_size(egui::vec2((ui.available_width() - 80.0).max(90.0), 30.0))
+                .corner_radius(RADIUS_SMALL),
         )
-        .min_size(egui::vec2((ui.available_width() - 80.0).max(90.0), 30.0))
-        .corner_radius(RADIUS_SMALL),
-    );
+        .on_hover_text(&env.name);
 
     // 点击行且当前未选中时：切换当前编辑的环境
     if response.clicked() && !is_selected {
@@ -272,14 +271,5 @@ fn draw_row_toggle(
     });
     if !toggle_cooling && toggle.clicked() {
         actions.push(SidebarAction::ToggleEnv(env.id.clone()));
-    }
-}
-
-/// 环境显示名：内置环境始终显示为 Current Machine
-fn env_display_name(env: &EnvInfo) -> &str {
-    if env.is_builtin {
-        crate::ui::CURRENT_MACHINE_NAME
-    } else {
-        &env.name
     }
 }

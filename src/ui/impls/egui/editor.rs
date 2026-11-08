@@ -17,6 +17,7 @@ pub(super) fn draw_editor(
     content: &mut String,
     is_active: bool,
     is_dirty: bool,
+    read_only: bool,
 ) -> (bool, Option<EditorAction>) {
     let c = theme_colors(ui.visuals().dark_mode);
     let mut changed = false;
@@ -32,16 +33,18 @@ pub(super) fn draw_editor(
             // 卡片撑满剩余空间
             ui.set_min_size(egui::vec2(ui.available_width(), ui.available_height()));
 
-            draw_editor_header(ui, env_name, is_active, is_dirty, &c);
+            draw_editor_header(ui, env_name, is_active, is_dirty, read_only, &c);
 
             ui.add_space(10.0);
 
-            changed = draw_text_editor(ui, content);
+            changed = draw_text_editor(ui, content, read_only);
 
-            ui.add_space(8.0);
+            if !read_only {
+                ui.add_space(8.0);
 
-            if draw_save_row(ui, &c) {
-                action = Some(EditorAction::Save);
+                if draw_save_row(ui, &c) {
+                    action = Some(EditorAction::Save);
+                }
             }
         });
 
@@ -54,6 +57,7 @@ fn draw_editor_header(
     env_name: &str,
     is_active: bool,
     is_dirty: bool,
+    read_only: bool,
     c: &ThemeColors,
 ) {
     ui.horizontal(|ui| {
@@ -74,6 +78,11 @@ fn draw_editor_header(
                 });
         }
 
+        // 内置环境是只读镜像
+        if read_only {
+            ui.label(egui::RichText::new("(Read-only)").small().weak());
+        }
+
         // 脏标记
         if is_dirty {
             ui.label(egui::RichText::new("●").color(c.warning));
@@ -82,7 +91,7 @@ fn draw_editor_header(
 }
 
 /// 文本编辑区，返回内容是否变更
-fn draw_text_editor(ui: &mut egui::Ui, content: &mut String) -> bool {
+fn draw_text_editor(ui: &mut egui::Ui, content: &mut String, read_only: bool) -> bool {
     let mut changed = false;
 
     egui::ScrollArea::vertical()
@@ -94,6 +103,7 @@ fn draw_text_editor(ui: &mut egui::Ui, content: &mut String) -> bool {
                 .desired_rows(30)
                 .desired_width(f32::INFINITY)
                 .margin(Margin::symmetric(8, 8))
+                .interactive(!read_only)
                 .frame(egui::Frame::NONE);
 
             let response = ui.add(text_edit);

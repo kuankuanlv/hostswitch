@@ -55,7 +55,10 @@ impl EnvManager {
 
         manager.load_envs()?;
         manager.ensure_local_env()?;
-        manager.system_hosts_baseline = manager.platform.read_system_hosts().ok();
+        match manager.refresh_local_mirror() {
+            Ok(hosts) => manager.system_hosts_baseline = Some(hosts),
+            Err(e) => debug!("failed to refresh local mirror: {e:#}"),
+        }
 
         debug!(
             hosts_path = manager.platform.hosts_file_path(),
@@ -241,6 +244,29 @@ impl EnvManager {
         self.platform.clone()
     }
 
+    /// 重读系统 hosts，刷新内置环境的正文镜像，返回读到的最新内容
+    pub fn refresh_local_mirror(&mut self) -> Result<String> {
+        let content = self.platform.read_system_hosts()?;
+        self.store
+            .save_env_content(GLOBAL_ENV_ID, &content)
+            .context("failed to refresh local mirror")?;
+        if let Some(env) = self.envs.iter_mut().find(|env| env.id == GLOBAL_ENV_ID) {
+            env.updated_at = Local::now();
+        }
+        Ok(content)
+    }
+
+    /// 写盘成功后把实际写入内容同步到内置环境镜像
+    pub fn sync_local_mirror(&mut self, content: &str) -> Result<()> {
+        self.store
+            .save_env_content(GLOBAL_ENV_ID, content)
+            .context("failed to sync local mirror")?;
+        if let Some(env) = self.envs.iter_mut().find(|env| env.id == GLOBAL_ENV_ID) {
+            env.updated_at = Local::now();
+        }
+        Ok(())
+    }
+
     /// 按当前激活集合算出目标内容，和系统现有 hosts 比对，决定要不要写盘
     pub fn sync_plan(&mut self) -> Result<SyncPlan> {
         let current = self.platform.read_system_hosts()?;
@@ -275,17 +301,23 @@ impl EnvManager {
     /// 生成合并内容（Global 垫底，后面的覆盖前面的）
     fn build_merged(&self) -> Result<String> {
         // 按 envs 列表顺序收集激活环境的内容
-        let mut env_contents: Vec<String> = Vec::new();
+        let mut env_contents: Vec<(String, String)> = Vec::new();
         for env in &self.envs {
             if self.is_active(&env.id) && env.id != GLOBAL_ENV_ID {
-                env_contents.push(self.store.load_env_content(&env.id)?);
+                let content = self.store.load_env_content(&env.id)?;
+                env_contents.push((env.id.clone(), content));
             }
         }
 
-        // Global（local）恒作为垫底
-        let local_content = self.store.load_env_content(GLOBAL_ENV_ID)?;
+        // Global（local）恒作为垫底：镜像里可能带整份 hosts 文件，只取系统默认段
+        let local_mirror = self.store.load_env_content(GLOBAL_ENV_ID)?;
+        let local_content =
+            HostsMerger::extract_local_content(&local_mirror).unwrap_or(local_mirror);
 
-        let refs: Vec<&str> = env_contents.iter().map(String::as_str).collect();
+        let refs: Vec<(&str, &str)> = env_contents
+            .iter()
+            .map(|(id, content)| (id.as_str(), content.as_str()))
+            .collect();
         Ok(HostsMerger::merge_many(&refs, Some(&local_content)))
     }
 
@@ -580,7 +612,7 @@ mod tests {
         make_manager_with_system(dir, envs, active, system_hosts).0
     }
 
-    fn merged_of(envs: &[&str]) -> String {
+    fn merged_of(envs: &[(&str, &str)]) -> String {
         HostsMerger::merge_many(envs, Some(LOCAL_CONTENT))
     }
 
@@ -602,7 +634,7 @@ mod tests {
     const ACTIVE_DEV_HOSTS: &str = "10.0.0.1 host-a";
 
     fn merged_active_dev() -> String {
-        merged_of(&[ACTIVE_DEV_HOSTS])
+        merged_of(&[("dev", ACTIVE_DEV_HOSTS)])
     }
 
     fn setup_no_active_env(dir: &Path) -> EnvManager {
@@ -729,6 +761,38 @@ mod tests {
 
         let error = manager.sync_plan().unwrap_err().to_string();
         assert!(error.contains("dev: line 1"), "error: {error}");
+    }
+
+    #[test]
+    fn test_refresh_local_mirror_stores_system_content() {
+        let dir = tempdir().unwrap();
+        let (mut manager, system) = make_manager_with_system(
+            dir.path(),
+            &[("dev", ACTIVE_DEV_HOSTS)],
+            &["dev"],
+            &merged_active_dev(),
+        );
+
+        let external = "198.51.100.9 external\n".to_string();
+        *system.lock().unwrap() = external.clone();
+
+        let content = manager.refresh_local_mirror().unwrap();
+        assert_eq!(content, external);
+        assert_eq!(manager.get_env_content(GLOBAL_ENV_ID).unwrap(), external);
+    }
+
+    #[test]
+    fn test_sync_plan_stable_after_mirror_store() {
+        let dir = tempdir().unwrap();
+        let (mut manager, _system) = make_manager_with_system(
+            dir.path(),
+            &[("dev", ACTIVE_DEV_HOSTS)],
+            &["dev"],
+            &merged_active_dev(),
+        );
+
+        manager.sync_local_mirror(&merged_active_dev()).unwrap();
+        assert!(matches!(manager.sync_plan().unwrap(), SyncPlan::InSync));
     }
 
     #[test]

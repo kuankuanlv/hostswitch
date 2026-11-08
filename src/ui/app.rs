@@ -189,6 +189,11 @@ impl HostswitchApp {
 
     /// 换编辑目标；未保存改动直接丢弃
     fn switch_env(&mut self, env_id: &str) {
+        // 内置环境是系统 hosts 的镜像，切过去前先重读一次
+        if env_id == GLOBAL_ENV_ID {
+            let _ = self.env_manager.refresh_local_mirror();
+        }
+
         match self.env_manager.set_selected_env(env_id) {
             Ok(_) => match self.env_manager.get_env_content(env_id) {
                 Ok(content) => {
@@ -214,6 +219,21 @@ impl HostswitchApp {
     fn save_current_env(&mut self) {
         let env_id = self.env_manager.selected_env_id().to_string();
 
+        // 内置环境是只读镜像：保存动作当作刷新系统 hosts 内容
+        if env_id == GLOBAL_ENV_ID {
+            match self.env_manager.refresh_local_mirror() {
+                Ok(content) => {
+                    self.current_content = content;
+                    self.is_dirty = false;
+                    self.set_status("Refreshed", StatusType::Success);
+                }
+                Err(e) => {
+                    self.set_status(format!("{}: {}", "Refresh failed", e), StatusType::Error);
+                }
+            }
+            return;
+        }
+
         match self
             .env_manager
             .save_env_content(&env_id, &self.current_content)
@@ -221,8 +241,8 @@ impl HostswitchApp {
             Ok(_) => {
                 self.is_dirty = false;
 
-                // local 垫底、激活环境参与合并，其余环境只影响自己的文件
-                if env_id == GLOBAL_ENV_ID || self.env_manager.is_active(&env_id) {
+                // 激活环境参与合并，其余环境只影响自己的文件
+                if self.env_manager.is_active(&env_id) {
                     self.request_sync(PendingSuccess::Save, None, false);
                 } else {
                     self.set_status("Saved", StatusType::Success);
@@ -381,6 +401,12 @@ impl HostswitchApp {
                 self.out_of_sync = true;
                 if system_changed && !force {
                     self.conflict = true;
+                    // 外部改过：先刷新镜像，让内置环境显示系统真实内容
+                    if let Ok(content) = self.env_manager.refresh_local_mirror() {
+                        if self.env_manager.selected_env_id() == GLOBAL_ENV_ID {
+                            self.current_content = content;
+                        }
+                    }
                     self.set_status(
                         "System hosts changed externally: click Overwrite to replace",
                         StatusType::Warning,
@@ -452,6 +478,11 @@ impl HostswitchApp {
                 self.out_of_sync = false;
                 self.conflict = false;
                 self.env_manager.confirm_system_hosts(&op.written);
+                let _ = self.env_manager.sync_local_mirror(&op.written);
+                if self.env_manager.selected_env_id() == GLOBAL_ENV_ID {
+                    self.current_content = op.written.clone();
+                    self.is_dirty = false;
+                }
                 self.finish_success(op.success, op.warning_count, true);
             }
             Some(Ok(Err(e))) => {
