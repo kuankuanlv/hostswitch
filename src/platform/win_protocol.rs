@@ -31,10 +31,7 @@ pub fn encode_command(cmd: &HelperCommand) -> Vec<u8> {
         HelperCommand::FlushDns => "FLUSH_DNS\n".to_string(),
         HelperCommand::Bye => "BYE\n".to_string(),
     };
-    let mut out = Vec::with_capacity(4 + text.len());
-    out.extend_from_slice(&(text.len() as u32).to_le_bytes());
-    out.extend_from_slice(text.as_bytes());
-    out
+    encode_frame(&text)
 }
 
 /// 编码响应：u32 LE 长度前缀 + UTF-8 文本
@@ -43,10 +40,7 @@ pub fn encode_response(resp: &HelperResponse) -> Vec<u8> {
         HelperResponse::Ok => "OK\n".to_string(),
         HelperResponse::Err(msg) => format!("ERR {}\n", msg),
     };
-    let mut out = Vec::with_capacity(4 + text.len());
-    out.extend_from_slice(&(text.len() as u32).to_le_bytes());
-    out.extend_from_slice(text.as_bytes());
-    out
+    encode_frame(&text)
 }
 
 /// 解码收到的命令消息（完整消息，含长度前缀）
@@ -74,6 +68,49 @@ pub fn decode_response(bytes: &[u8]) -> Option<HelperResponse> {
     None
 }
 
+/// 解析 helper 启动参数：`--helper`
+/// args 为 std::env::args() 的完整收集（含程序名，自动跳过）
+pub fn parse_helper_args(args: &[String]) -> bool {
+    args.get(1).map(String::as_str) == Some("--helper")
+}
+
+/// 两个路径是否等价：优先 canonicalize 精确比较，失败时词法比较
+pub fn is_same_path(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => lex_normalize(a) == lex_normalize(b),
+    }
+}
+
+/// 应用来源白名单：仅允许系统临时目录下的 hostswitch 临时文件
+pub fn is_allowed_temp_file(p: &Path) -> bool {
+    let Some(parent) = p.parent() else {
+        return false;
+    };
+    if !is_same_path(parent, &std::env::temp_dir()) {
+        return false;
+    }
+
+    let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if !name.starts_with("hostswitch_") || !name.ends_with(".tmp") {
+        return false;
+    }
+
+    p.canonicalize()
+        .map(|real| real.is_file())
+        .unwrap_or(false)
+}
+
+/// 编码一帧：u32 LE 长度前缀 + UTF-8 文本
+fn encode_frame(text: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + text.len());
+    out.extend_from_slice(&(text.len() as u32).to_le_bytes());
+    out.extend_from_slice(text.as_bytes());
+    out
+}
+
 fn decode_text(bytes: &[u8]) -> Option<&str> {
     if bytes.len() < 4 {
         return None;
@@ -85,31 +122,12 @@ fn decode_text(bytes: &[u8]) -> Option<&str> {
     std::str::from_utf8(&bytes[4..]).ok()
 }
 
-/// 解析 helper 启动参数：`--helper`
-/// args 为 std::env::args() 的完整收集（含程序名，自动跳过）
-pub fn parse_helper_args(args: &[String]) -> bool {
-    args.get(1).map(String::as_str) == Some("--helper")
-}
-
 /// 规范化路径用于比较：统一分隔符、去尾分隔符、小写（Windows 路径语义）
 fn lex_normalize(p: &Path) -> String {
     p.to_string_lossy()
         .replace('\\', "/")
         .trim_end_matches('/')
         .to_lowercase()
-}
-
-/// 两个路径是否等价：优先 canonicalize 精确比较，失败时词法比较
-pub fn is_same_path(a: &Path, b: &Path) -> bool {
-    match (a.canonicalize(), b.canonicalize()) {
-        (Ok(ca), Ok(cb)) => ca == cb,
-        _ => lex_normalize(a) == lex_normalize(b),
-    }
-}
-
-/// 路径白名单：仅允许系统 hosts 精确路径（helper 复制目标校验）
-pub fn is_allowed_hosts_path(p: &Path) -> bool {
-    is_same_path(p, Path::new(WINDOWS_HOSTS_PATH))
 }
 
 #[cfg(test)]
@@ -184,20 +202,20 @@ mod tests {
     }
 
     #[test]
-    fn test_whitelist_accepts_exact_path() {
-        // 精确路径（macOS 上目标不存在 → canonicalize 失败 → 词法比较）
-        assert!(is_allowed_hosts_path(Path::new(WINDOWS_HOSTS_PATH)));
-        // Windows 路径大小写不敏感
-        assert!(is_allowed_hosts_path(Path::new(r"c:\windows\system32\drivers\etc\HOSTS")));
-        // 尾部分隔符差异（末尾反斜杠：raw string 中 \ 不转义，`\"` 即闭合）
-        assert!(is_allowed_hosts_path(Path::new(r"C:\Windows\System32\drivers\etc\hosts\")));
+    fn test_temp_file_whitelist_accepts_hostswitch_temp_file() {
+        let path = std::env::temp_dir().join(format!("hostswitch_test_{}.tmp", std::process::id()));
+        std::fs::write(&path, b"127.0.0.1 localhost\n").unwrap();
+        assert!(is_allowed_temp_file(&path));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn test_whitelist_rejects_other_path() {
-        assert!(!is_allowed_hosts_path(Path::new(r"C:\Windows\System32\drivers\etc\hosts2")));
-        assert!(!is_allowed_hosts_path(Path::new("/etc/hosts")));
-        assert!(!is_allowed_hosts_path(Path::new(r"C:\Windows\System32\drivers\etc")));
+    fn test_temp_file_whitelist_rejects_other_paths() {
+        let temp = std::env::temp_dir();
+        assert!(!is_allowed_temp_file(&temp.join("hostswitch_test.tmp.bak")));
+        assert!(!is_allowed_temp_file(&temp.join("other.tmp")));
+        assert!(!is_allowed_temp_file(Path::new("/etc/hosts")));
+        assert!(!is_allowed_temp_file(&temp.join("hostswitch_missing.tmp")));
     }
 
     #[test]

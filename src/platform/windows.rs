@@ -77,7 +77,7 @@ impl WindowsPlatform {
     /// 探测 helper 管道是否可连：只探测不实际连接
     /// 忙（PIPE_BUSY）也算存在：helper 正在处理请求，不算没有 helper，
     /// 避免误判后重新弹 UAC 启动第二个 helper
-    fn pipe_available() -> bool {
+    fn helper_pipe_exists() -> bool {
         let name = to_wide(&Self::pipe_name());
         let ok = unsafe { WaitNamedPipeW(name.as_ptr(), 100) };
         if ok != 0 {
@@ -92,30 +92,36 @@ impl WindowsPlatform {
             info!("running elevated, no helper needed");
             return Ok(());
         }
-        if Self::pipe_available() {
+        if Self::helper_pipe_exists() {
             // 管道已就绪：跨进程静默复用
             info!("helper already running, reusing");
             return Ok(());
         }
 
-        // 无 helper：Idle 或上次失败（用户取消）都重新弹 UAC；
-        // Launching（UAC 还在途）则不重复弹，下面轮询等同一个结果
-        {
-            let mut state = HELPER_LAUNCH_STATE
-                .lock()
-                .map_err(|_| anyhow!("helper launch mutex error"))?;
-            if matches!(*state, LaunchState::Idle | LaunchState::Failed) {
-                *state = LaunchState::Launching;
-                drop(state);
-                Self::spawn_helper()?;
-            }
-        }
+        Self::launch_helper()?;
+        Self::wait_helper_ready()
+    }
 
-        // 轮询等待 helper 就绪；用户取消（Failed）立即返回，不干等超时
+    /// 无 helper 时启动：Idle 或上次失败（用户取消）都重新弹 UAC；
+    /// Launching（UAC 还在途）则不重复弹，交给轮询等同一个结果
+    fn launch_helper() -> Result<()> {
+        let mut state = HELPER_LAUNCH_STATE
+            .lock()
+            .map_err(|_| anyhow!("helper launch mutex error"))?;
+        if matches!(*state, LaunchState::Idle | LaunchState::Failed) {
+            *state = LaunchState::Launching;
+            drop(state);
+            Self::spawn_helper()?;
+        }
+        Ok(())
+    }
+
+    /// 轮询等待 helper 就绪；用户取消（Failed）立即返回，不干等超时
+    fn wait_helper_ready() -> Result<()> {
         info!("waiting for helper pipe: {}", Self::pipe_name());
         let deadline = Instant::now() + HELPER_READY_TIMEOUT;
         loop {
-            if Self::pipe_available() {
+            if Self::helper_pipe_exists() {
                 // 成功：状态复位，避免下次误判 Launching 不弹 UAC
                 let _ = HELPER_LAUNCH_STATE
                     .lock()
@@ -251,21 +257,58 @@ impl WindowsPlatform {
 
     /// 单锁：写 hosts + flush DNS（一次 helper 往返或本进程 API）
     fn write_and_flush_locked(&self, content: &str) -> Result<()> {
-        let _guard = WRITE_OP_LOCK
-            .lock()
-            .map_err(|_| anyhow!("write lock poisoned"))?;
+        let _guard = Self::write_lock("write lock poisoned")?;
         self.ensure_elevated()?;
 
         if self.has_admin_privileges() {
-            self.write_hosts_elevated(content)?;
-            flush_dns()?;
-            return Ok(());
+            self.write_hosts_direct(content)?;
+            return flush_dns();
         }
 
+        // Apply 在 helper 内会顺带 flush DNS，避免第二次管道往返
+        self.apply_via_helper(content)
+    }
+
+    /// 写 hosts：已提权直写，否则临时文件走 helper
+    fn write_system_hosts_locked(&self, content: &str) -> Result<()> {
+        let _guard = Self::write_lock("write lock poisoned")?;
+        self.ensure_elevated()?;
+
+        if self.has_admin_privileges() {
+            return self.write_hosts_direct(content);
+        }
+
+        self.apply_via_helper(content)
+    }
+
+    /// 刷新 DNS：已提权直接调 API，否则走 helper 管道
+    fn flush_dns_locked(&self) -> Result<()> {
+        let _guard = Self::write_lock("flush lock poisoned")?;
+        self.ensure_elevated()?;
+
+        if self.has_admin_privileges() {
+            return flush_dns();
+        }
+
+        match self.send_command(&HelperCommand::FlushDns)? {
+            HelperResponse::Ok => {
+                info!("DNS cache flushed");
+                Ok(())
+            }
+            HelperResponse::Err(msg) => Err(anyhow!("helper flush failed: {}", msg)),
+        }
+    }
+
+    /// 写操作串行锁；message 保留各调用点原有错误文案
+    fn write_lock(message: &str) -> Result<std::sync::MutexGuard<'static, ()>> {
+        WRITE_OP_LOCK.lock().map_err(|_| anyhow!("{}", message))
+    }
+
+    /// 临时文件交给 helper APPLY；Apply 在 helper 内会顺带刷 DNS
+    fn apply_via_helper(&self, content: &str) -> Result<()> {
         let tmp = std::env::temp_dir().join(format!("hostswitch_{}.tmp", std::process::id()));
         std::fs::write(&tmp, content)
             .with_context(|| format!("failed to write temp file: {}", tmp.display()))?;
-        // Apply 在 helper 内会顺带 flush DNS，避免第二次管道往返
         let result = self.send_command(&HelperCommand::Apply(tmp.to_string_lossy().to_string()));
         let _ = std::fs::remove_file(&tmp);
 
@@ -279,7 +322,7 @@ impl WindowsPlatform {
     }
 
     /// 以管理员身份执行时，直接写系统 hosts 并回读校验
-    fn write_hosts_elevated(&self, content: &str) -> Result<()> {
+    fn write_hosts_direct(&self, content: &str) -> Result<()> {
         std::fs::write(&self.hosts_path, content)
             .with_context(|| format!("failed to write system hosts: {}", self.hosts_path))?;
         let written = std::fs::read_to_string(&self.hosts_path)?;
@@ -307,55 +350,11 @@ impl HostsPlatform for WindowsPlatform {
     }
 
     fn write_system_hosts(&self, content: &str) -> Result<()> {
-        // 写操作串行：频繁点击时逐个执行，请求排队交给 helper
-        let _guard = WRITE_OP_LOCK
-            .lock()
-            .map_err(|_| anyhow!("write lock poisoned"))?;
-        // 先确保已提权：已提权或 helper 就绪则直接复用；否则启动 helper（首次弹 UAC）
-        self.ensure_elevated()?;
-
-        // 已提权：直接写
-        if self.has_admin_privileges() {
-            return self.write_hosts_elevated(content);
-        }
-
-        // 普通权限：临时文件暂存 → helper 管道 APPLY
-        let tmp = std::env::temp_dir().join(format!("hostswitch_{}.tmp", std::process::id()));
-        std::fs::write(&tmp, content)
-            .with_context(|| format!("failed to write temp file: {}", tmp.display()))?;
-        let result = self.send_command(&HelperCommand::Apply(tmp.to_string_lossy().to_string()));
-        let _ = std::fs::remove_file(&tmp);
-
-        match result? {
-            HelperResponse::Ok => {
-                info!("wrote system hosts file");
-                Ok(())
-            }
-            HelperResponse::Err(msg) => Err(anyhow!("helper apply failed: {}", msg)),
-        }
+        self.write_system_hosts_locked(content)
     }
 
     fn flush_dns_cache(&self) -> Result<()> {
-        // 写操作串行：与写 hosts 共用一把锁，避免并发请求 helper
-        let _guard = WRITE_OP_LOCK
-            .lock()
-            .map_err(|_| anyhow!("flush lock poisoned"))?;
-        // 先确保已提权：已提权或 helper 就绪则直接复用；否则启动 helper（首次弹 UAC）
-        self.ensure_elevated()?;
-
-        // 已提权：直接调 DNS API（无控制台窗口）
-        if self.has_admin_privileges() {
-            flush_dns()?;
-            return Ok(());
-        }
-
-        match self.send_command(&HelperCommand::FlushDns)? {
-            HelperResponse::Ok => {
-                info!("DNS cache flushed");
-                Ok(())
-            }
-            HelperResponse::Err(msg) => Err(anyhow!("helper flush failed: {}", msg)),
-        }
+        self.flush_dns_locked()
     }
 
     fn write_system_hosts_and_flush(&self, content: &str) -> Result<()> {
@@ -400,25 +399,25 @@ fn to_wide(s: &str) -> Vec<u16> {
 /// 写入完整消息：u32 LE 长度前缀 + 数据
 fn write_message(handle: HANDLE, payload: &[u8]) -> io::Result<()> {
     let len = payload.len() as u32;
-    write_all(handle, &len.to_le_bytes())?;
-    write_all(handle, payload)
+    write_pipe_all(handle, &len.to_le_bytes())?;
+    write_pipe_all(handle, payload)
 }
 
 /// 读取完整消息：u32 LE 长度前缀 + 数据（上限 MAX_MESSAGE）
 fn read_message(handle: HANDLE) -> io::Result<Vec<u8>> {
     let mut len_buf = [0u8; 4];
-    read_exact(handle, &mut len_buf)?;
+    read_pipe_exact(handle, &mut len_buf)?;
     let len = u32::from_le_bytes(len_buf) as usize;
     if len > MAX_MESSAGE {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "message too large"));
     }
     let mut buf = vec![0u8; len];
-    read_exact(handle, &mut buf)?;
+    read_pipe_exact(handle, &mut buf)?;
     Ok(buf)
 }
 
 /// 循环写直到写完（ReadFile/WriteFile 可能部分读写）
-fn write_all(handle: HANDLE, mut data: &[u8]) -> io::Result<()> {
+fn write_pipe_all(handle: HANDLE, mut data: &[u8]) -> io::Result<()> {
     while !data.is_empty() {
         let mut written = 0u32;
         let ok = unsafe {
@@ -439,7 +438,7 @@ fn write_all(handle: HANDLE, mut data: &[u8]) -> io::Result<()> {
 }
 
 /// 循环读直到读满
-fn read_exact(handle: HANDLE, buf: &mut [u8]) -> io::Result<()> {
+fn read_pipe_exact(handle: HANDLE, buf: &mut [u8]) -> io::Result<()> {
     let mut filled = 0usize;
     while filled < buf.len() {
         let mut n = 0u32;
@@ -484,47 +483,108 @@ fn process_exe_path(pid: u32) -> Option<String> {
 /// 提权助手服务端入口（--helper 模式）
 /// 由提权后的自身副本运行：监听命名管道，处理 APPLY / FLUSH_DNS / BYE。
 /// helper 常驻：不随主进程退出，空闲 HELPER_IDLE_TIMEOUT 后自动退出（防残留）
-pub fn run_helper() -> Result<()> {
-    // helper 进程独立日志（主进程日志此时尚未初始化，文件名带 PID 防多实例互相覆盖）
-    crate::logs::init_global_logging(&format!(
-        "hostswitch-helper-{}.log",
-        std::process::id()
-    ))
-    .context("failed to init helper logging")?;
+pub(super) fn run_helper() -> Result<()> {
+    init_helper_logging()?;
 
     // 已有一个 helper 在监听（含忙）：自我退出，避免双实例并存
-    if WindowsPlatform::pipe_available() {
+    if WindowsPlatform::helper_pipe_exists() {
         info!("another helper already running, exiting");
         return Ok(());
     }
 
-    // 空闲超时监视线程：长时间无客户端活动则退出
-    {
-        let _ = LAST_ACTIVITY
-            .lock()
-            .map(|mut g| *g = Some(Instant::now()));
-        std::thread::spawn(move || loop {
-            std::thread::sleep(Duration::from_secs(30));
-            let idle = LAST_ACTIVITY
-                .lock()
-                .map(|g| g.map(|t| t.elapsed()).unwrap_or(Duration::ZERO))
-                .unwrap_or(Duration::ZERO);
-            if idle > HELPER_IDLE_TIMEOUT {
-                info!(
-                    "helper idle for {}s, exiting",
-                    HELPER_IDLE_TIMEOUT.as_secs()
-                );
-                std::process::exit(0);
-            }
-        });
-    }
+    start_idle_watchdog();
 
     let pipe_name = to_wide(&WindowsPlatform::pipe_name());
     info!("helper listening on pipe {}", WindowsPlatform::pipe_name());
 
-    // 管道安全描述符：默认 DACL 只给 SYSTEM/管理员/创建者，UAC 降权的主进程连不上
-    // （管理员组是 deny-only，对象管理器直接拒绝，表现为文件不存在）；
-    // 显式给 Everyone 读写权限，护栏的 exe 路径校验仍会拒绝非 hostswitch 进程
+    let mut pipe_sa = pipe_security();
+
+    // 自身 exe 完整路径：客户端校验基准
+    let self_exe = process_exe_path(std::process::id()).unwrap_or_default();
+
+    accept_loop(&pipe_name, &mut pipe_sa, &self_exe)
+}
+
+/// 接受连接并逐个服务，收到 BYE 时退出
+fn accept_loop(
+    pipe_name: &[u16],
+    pipe_sa: &mut windows_sys::Win32::Security::SECURITY_ATTRIBUTES,
+    self_exe: &str,
+) -> Result<()> {
+    loop {
+        let Some(handle) = try_accept_connection(pipe_name, pipe_sa)
+            .context("CreateNamedPipeW failed")?
+        else {
+            continue;
+        };
+
+        if !trusted_client(handle, self_exe) {
+            disconnect_and_close(handle);
+            continue;
+        }
+
+        match serve_connection(handle)? {
+            ServeOutcome::Bye => {
+                info!("helper received BYE, exiting");
+                return Ok(());
+            }
+            ServeOutcome::Broken => {
+                info!("client connection closed, waiting for next");
+            }
+        }
+    }
+}
+
+/// 服务单个连接，结束后断开并记录活动时间
+fn serve_connection(handle: HANDLE) -> Result<ServeOutcome> {
+    let outcome = serve_client(handle)?;
+    disconnect_and_close(handle);
+    // 记录活动时间，空闲计时重新开始
+    let _ = LAST_ACTIVITY
+        .lock()
+        .map(|mut g| *g = Some(Instant::now()));
+    Ok(outcome)
+}
+
+/// 断开并关闭一个管道连接
+fn disconnect_and_close(handle: HANDLE) {
+    unsafe {
+        windows_sys::Win32::System::Pipes::DisconnectNamedPipe(handle);
+        CloseHandle(handle);
+    }
+}
+
+/// helper 进程独立日志：主进程日志尚未初始化，文件名带 PID 防多实例互相覆盖
+fn init_helper_logging() -> Result<()> {
+    crate::logs::init_global_logging(&format!(
+        "hostswitch-helper-{}.log",
+        std::process::id()
+    ))
+    .context("failed to init helper logging")
+}
+
+/// 空闲超时监视线程：长时间无客户端活动则退出
+fn start_idle_watchdog() {
+    let _ = LAST_ACTIVITY
+        .lock()
+        .map(|mut g| *g = Some(Instant::now()));
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(30));
+        let idle = LAST_ACTIVITY
+            .lock()
+            .map(|g| g.map(|t| t.elapsed()).unwrap_or(Duration::ZERO))
+            .unwrap_or(Duration::ZERO);
+        if idle > HELPER_IDLE_TIMEOUT {
+            info!("helper idle for {}s, exiting", HELPER_IDLE_TIMEOUT.as_secs());
+            std::process::exit(0);
+        }
+    });
+}
+
+/// 管道安全描述符：默认 DACL 只给 SYSTEM/管理员/创建者，UAC 降权的主进程连不上
+/// （管理员组是 deny-only，对象管理器直接拒绝，表现为文件不存在）；
+/// 显式给 Everyone 读写权限，护栏的 exe 路径校验仍会拒绝非 hostswitch 进程
+fn pipe_security() -> windows_sys::Win32::Security::SECURITY_ATTRIBUTES {
     let sd_sddl = to_wide("D:(A;;GRGW;;;WD)(A;;GA;;;BA)");
     let mut sd: *mut std::ffi::c_void = std::ptr::null_mut();
     let mut sd_size = 0u32;
@@ -537,90 +597,73 @@ pub fn run_helper() -> Result<()> {
                 &mut sd_size,
             )
     };
-    let mut pipe_sa = windows_sys::Win32::Security::SECURITY_ATTRIBUTES {
+    windows_sys::Win32::Security::SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<windows_sys::Win32::Security::SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: if sd_ok != 0 { sd } else { std::ptr::null_mut() },
         bInheritHandle: 0,
+    }
+}
+
+/// 创建管道并等待客户端连接；未连上（非 PIPE_CONNECTED 错误）返回 Ok(None)
+fn try_accept_connection(
+    pipe_name: &[u16],
+    pipe_sa: &mut windows_sys::Win32::Security::SECURITY_ATTRIBUTES,
+) -> io::Result<Option<HANDLE>> {
+    let handle = unsafe {
+        windows_sys::Win32::System::Pipes::CreateNamedPipeW(
+            pipe_name.as_ptr(),
+            windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX,
+            windows_sys::Win32::System::Pipes::PIPE_TYPE_BYTE
+                | windows_sys::Win32::System::Pipes::PIPE_READMODE_BYTE
+                | windows_sys::Win32::System::Pipes::PIPE_WAIT,
+            windows_sys::Win32::System::Pipes::PIPE_UNLIMITED_INSTANCES,
+            4096,
+            4096,
+            0,
+            pipe_sa as *mut _,
+        )
     };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
 
-    // 自身 exe 完整路径：客户端校验基准
-    let self_exe = process_exe_path(std::process::id()).unwrap_or_default();
-
-    loop {
-        let handle = unsafe {
-            windows_sys::Win32::System::Pipes::CreateNamedPipeW(
-                pipe_name.as_ptr(),
-                windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX,
-                windows_sys::Win32::System::Pipes::PIPE_TYPE_BYTE
-                    | windows_sys::Win32::System::Pipes::PIPE_READMODE_BYTE
-                    | windows_sys::Win32::System::Pipes::PIPE_WAIT,
-                windows_sys::Win32::System::Pipes::PIPE_UNLIMITED_INSTANCES,
-                4096,
-                4096,
-                0,
-                &mut pipe_sa as *mut _,
-            )
-        };
-        if handle == INVALID_HANDLE_VALUE {
-            return Err(io::Error::last_os_error()).context("CreateNamedPipeW failed");
-        }
-
-        // 等待连接（阻塞）；若客户端已先连接则 ERROR_PIPE_CONNECTED
-        let connected = unsafe {
-            windows_sys::Win32::System::Pipes::ConnectNamedPipe(handle, std::ptr::null_mut())
-        };
-        if connected == 0 {
-            let err = io::Error::last_os_error();
-            if err.raw_os_error() != Some(ERROR_PIPE_CONNECTED as i32) {
-                unsafe {
-                    CloseHandle(handle);
-                }
-                continue;
-            }
-        }
-
-        // 护栏：客户端必须是 hostswitch 自身（exe 路径一致），拒绝其它进程
-        let mut client_pid = 0u32;
-        let ok = unsafe {
-            windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId(handle, &mut client_pid)
-        };
-        let trusted = ok != 0
-            && !self_exe.is_empty()
-            && process_exe_path(client_pid)
-                .map(|p| p.eq_ignore_ascii_case(&self_exe))
-                .unwrap_or(false);
-        if !trusted {
-            warn!(
-                "rejecting connection from unexpected process: pid {}",
-                client_pid
-            );
+    // 等待连接（阻塞）；若客户端已先连接则 ERROR_PIPE_CONNECTED
+    let connected = unsafe {
+        windows_sys::Win32::System::Pipes::ConnectNamedPipe(handle, std::ptr::null_mut())
+    };
+    if connected == 0 {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() != Some(ERROR_PIPE_CONNECTED as i32) {
             unsafe {
-                windows_sys::Win32::System::Pipes::DisconnectNamedPipe(handle);
                 CloseHandle(handle);
             }
-            continue;
-        }
-
-        // 服务该连接上的命令序列
-        let outcome = serve_client(handle)?;
-        unsafe {
-            windows_sys::Win32::System::Pipes::DisconnectNamedPipe(handle);
-            CloseHandle(handle);
-        }
-        // 记录活动时间，空闲计时重新开始
-        let _ = LAST_ACTIVITY
-            .lock()
-            .map(|mut g| *g = Some(Instant::now()));
-        match outcome {
-            ServeOutcome::Bye => {
-                info!("helper received BYE, exiting");
-                return Ok(());
-            }
-            ServeOutcome::Broken => {
-                info!("client connection closed, waiting for next");
-            }
+            return Ok(None);
         }
     }
+
+    Ok(Some(handle))
+}
+
+/// 护栏：客户端必须是 hostswitch 自身（exe 路径一致），拒绝其它进程
+fn trusted_client(handle: HANDLE, self_exe: &str) -> bool {
+    let mut client_pid = 0u32;
+    let ok = unsafe {
+        windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId(handle, &mut client_pid)
+    };
+    if ok != 0
+        && !self_exe.is_empty()
+        && process_exe_path(client_pid)
+            .map(|p| p.eq_ignore_ascii_case(self_exe))
+            .unwrap_or(false)
+    {
+        return true;
+    }
+
+    warn!(
+        "rejecting connection from unexpected process: pid {}",
+        client_pid
+    );
+    false
 }
 
 enum ServeOutcome {
@@ -658,16 +701,17 @@ fn serve_client(handle: HANDLE) -> Result<ServeOutcome> {
     }
 }
 
-/// 应用临时文件到系统 hosts：路径白名单 + 写后回读校验
+/// 应用临时文件到系统 hosts：来源白名单 + 写后回读校验
 fn apply_temp_file(tmp_path: &str) -> Result<()> {
-    // 护栏：目标必须是系统 hosts 精确路径
-    let target = Path::new(WINDOWS_HOSTS_PATH);
-    if !super::win_protocol::is_allowed_hosts_path(target) {
-        return Err(anyhow!("target path not allowed: {}", target.display()));
+    // 护栏：只接受系统临时目录下的 hostswitch 临时文件
+    let source = Path::new(tmp_path);
+    if !super::win_protocol::is_allowed_temp_file(source) {
+        return Err(anyhow!("temp file path not allowed: {}", tmp_path));
     }
 
-    let data = std::fs::read(tmp_path)
+    let data = std::fs::read(source)
         .with_context(|| format!("failed to read temp file: {}", tmp_path))?;
+    let target = Path::new(WINDOWS_HOSTS_PATH);
     std::fs::write(target, &data)
         .with_context(|| format!("failed to write system hosts: {}", target.display()))?;
 

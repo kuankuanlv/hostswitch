@@ -5,13 +5,13 @@ pub trait HostsPlatform {
     /// 读取系统 hosts 文件内容
     fn read_system_hosts(&self) -> Result<String>;
 
-    /// 写入系统 hosts 文件（需要提权）
+    /// 写入系统 hosts 文件
     fn write_system_hosts(&self, content: &str) -> Result<()>;
 
-    /// 刷新 DNS 缓存（需要提权）
+    /// 刷新 DNS 缓存
     fn flush_dns_cache(&self) -> Result<()>;
 
-    /// 写入系统 hosts 并刷新 DNS（默认分两步；Windows 可合并为一次提权/管道往返）
+    /// 写入系统 hosts 并刷新 DNS
     fn write_system_hosts_and_flush(&self, content: &str) -> Result<()> {
         self.write_system_hosts(content)?;
         self.flush_dns_cache()?;
@@ -32,11 +32,11 @@ pub trait HostsPlatform {
 pub fn create_platform() -> Box<dyn HostsPlatform + Send + Sync> {
     #[cfg(target_os = "macos")]
     {
-        Box::new(super::MacosPlatform::new())
+        Box::new(super::macos::MacosPlatform::new())
     }
     #[cfg(target_os = "windows")]
     {
-        Box::new(super::WindowsPlatform::new())
+        Box::new(super::windows::WindowsPlatform::new())
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {

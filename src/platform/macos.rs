@@ -52,16 +52,6 @@ const HOSTS_TEMP_PREFIX: &str = "/tmp/hostswitch_hosts_";
 /// 完成标记序号：每次用不重复的名字，避免残留标记误判
 static MARKER_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-/// 生成一个不重复的完成标记路径
-fn next_marker(tag: &str) -> String {
-    format!(
-        "/tmp/hostswitch_{}_{}_{}",
-        tag,
-        std::process::id(),
-        MARKER_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    )
-}
-
 /// macOS 平台实现
 pub struct MacosPlatform {
     hosts_path: String,
@@ -76,7 +66,7 @@ impl MacosPlatform {
 
     /// 获取（或创建）进程级授权引用
     #[cfg(not(test))]
-    fn authorize() -> Result<AuthorizationRef> {
+    fn cached_authorization() -> Result<AuthorizationRef> {
         let mut guard = AUTH_REF.lock().map_err(|_| anyhow!("authorization mutex error"))?;
 
         if let Some(auth) = *guard {
@@ -114,7 +104,7 @@ impl MacosPlatform {
         self.ensure_elevated()?;
 
         // 此处拿到的授权引用来自缓存，不会再次弹框
-        let auth = Self::authorize()?;
+        let auth = Self::cached_authorization()?;
 
         // 以 root 执行 /bin/sh -c "command"
         let c_command = CString::new(command).map_err(|_| anyhow!("command contains null byte"))?;
@@ -168,50 +158,97 @@ impl MacosPlatform {
 
         Ok(())
     }
-}
 
-/// 注册自定义授权项，授权框里显示"要干什么"而不是干巴巴的进程名
-#[cfg(not(test))]
-fn register_privilege_right(auth: AuthorizationRef) {
-    use core_foundation_sys::base::{kCFAllocatorDefault, CFRelease, CFTypeRef};
-    use core_foundation_sys::string::{kCFStringEncodingUTF8, CFStringCreateWithCString};
+    /// 写系统 hosts 的临时文件（644 权限），返回路径
+    fn prepare_temp_hosts(content: &str) -> Result<String> {
+        let temp_path = format!("{}{}", HOSTS_TEMP_PREFIX, std::process::id());
+        let mut file = fs::File::create(&temp_path)
+            .with_context(|| format!("failed to create temp file: {}", temp_path))?;
+        file.write_all(content.as_bytes())
+            .context("failed to write temp file")?;
+        // 设置权限为 644
+        fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o644))
+            .context("failed to set temp file permissions")?;
+        Ok(temp_path)
+    }
 
-    let description = "hostswitch needs administrator privileges to modify the system hosts file";
-    // 管理员规则：弹框要求输入管理员密码
-    let rule = "authenticate-session-owner-as-admin";
-
-    unsafe {
-        let rule_cf = CFStringCreateWithCString(
-            kCFAllocatorDefault,
-            rule.as_ptr() as *const c_char,
-            kCFStringEncodingUTF8,
+    /// 提权把临时文件复制到系统 hosts；cp 完成后 touch 标记文件
+    fn copy_hosts_as_root(&self, temp_path: &str, marker: &str) -> Result<()> {
+        // 带 uid 诊断：确认命令确实以 root 执行
+        // chmod 666 让普通用户能清理标记文件
+        let command = format!(
+            "echo \"hosts_executor_uid=$(id -u)\" >&2; cp {} {} && touch {} && chmod 666 {}",
+            temp_path, self.hosts_path, marker, marker
         );
-        let desc_cf = CFStringCreateWithCString(
-            kCFAllocatorDefault,
-            description.as_ptr() as *const c_char,
-            kCFStringEncodingUTF8,
-        );
+        self.run_privileged(&command)
+    }
 
-        if !rule_cf.is_null() && !desc_cf.is_null() {
-            let status = AuthorizationRightSet(
-                auth,
-                c"com.hostswitch.admin".as_ptr(),
-                rule_cf as CFTypeRef,
-                desc_cf,
-                std::ptr::null_mut(),
-                std::ptr::null(),
-            );
-            if status != errAuthorizationSuccess {
-                debug!("failed to register privilege right: {}", status);
+    /// 轮询完成标记，最多等 5 秒
+    fn wait_for_marker(marker: &str) -> bool {
+        for _ in 0..MARKER_POLL_ATTEMPTS {
+            if Path::new(marker).exists() {
+                return true;
             }
+            std::thread::sleep(std::time::Duration::from_millis(MARKER_POLL_INTERVAL_MS));
         }
+        false
+    }
 
-        if !rule_cf.is_null() {
-            CFRelease(rule_cf as CFTypeRef);
+    /// 注册自定义授权项：只注册一次（这步很慢）
+    #[cfg(not(test))]
+    fn register_right_once(auth: AuthorizationRef) {
+        static RIGHT_REGISTERED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if !RIGHT_REGISTERED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            register_privilege_right(auth);
         }
-        if !desc_cf.is_null() {
-            CFRelease(desc_cf as CFTypeRef);
-        }
+    }
+
+    /// 申请管理员权限：标准 execute 权限 + 自定义授权项（弹框描述）
+    #[cfg(not(test))]
+    fn copy_admin_rights(auth: AuthorizationRef) -> Result<i32> {
+        let sys_right = CString::new("system.privilege.admin")
+            .map_err(|_| anyhow!("invalid authorization right: system.privilege.admin"))?;
+        let custom_right = CString::new(PRIVILEGE_RIGHT)
+            .map_err(|_| anyhow!("invalid authorization right: {}", PRIVILEGE_RIGHT))?;
+        let mut items = [
+            AuthorizationItem {
+                name: sys_right.as_ptr(),
+                valueLength: 0,
+                value: std::ptr::null_mut(),
+                flags: 0,
+            },
+            AuthorizationItem {
+                name: custom_right.as_ptr(),
+                valueLength: 0,
+                value: std::ptr::null_mut(),
+                flags: 0,
+            },
+        ];
+        let rights = AuthorizationRights {
+            count: 2,
+            items: items.as_mut_ptr(),
+        };
+        Ok(unsafe {
+            AuthorizationCopyRights(
+                auth,
+                &rights,
+                std::ptr::null(),
+                kAuthorizationFlagExtendRights
+                    | kAuthorizationFlagInteractionAllowed
+                    | kAuthorizationFlagPreAuthorize,
+                std::ptr::null_mut(),
+            )
+        })
+    }
+
+    /// 丢弃缓存的授权引用，下次重新申请
+    #[cfg(not(test))]
+    fn invalidate_auth_ref() -> Result<()> {
+        *AUTH_REF
+            .lock()
+            .map_err(|_| anyhow!("authorization mutex error"))? = None;
+        Ok(())
     }
 }
 
@@ -231,53 +268,32 @@ impl HostsPlatform for MacosPlatform {
     }
 
     fn write_system_hosts(&self, content: &str) -> Result<()> {
-        let temp_path = format!("{}{}", HOSTS_TEMP_PREFIX, std::process::id());
+        let temp_path = Self::prepare_temp_hosts(content)?;
         // 完成标记：每次唯一，确认命令真正跑完（授权 API 是异步的）
         let marker = next_marker("done");
 
-        // 写入临时文件
-        {
-            let mut file = fs::File::create(&temp_path)
-                .with_context(|| format!("failed to create temp file: {}", temp_path))?;
-            file.write_all(content.as_bytes())
-                .context("failed to write temp file")?;
-            // 设置权限为 644
-            fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o644))
-                .context("failed to set temp file permissions")?;
-        }
-
-        // 提权复制：cp 完成后 touch 标记文件；chmod 666 让普通用户能清理
-        // 带 uid 诊断：确认命令确实以 root 执行
-        let command = format!(
-            "echo \"hosts_executor_uid=$(id -u)\" >&2; cp {} {} && touch {} && chmod 666 {}",
-            temp_path, self.hosts_path, marker, marker
-        );
-        if let Err(e) = self.run_privileged(&command) {
+        if let Err(e) = self.copy_hosts_as_root(&temp_path, &marker) {
             let _ = fs::remove_file(&temp_path);
             return Err(e);
         }
 
         // 等标记文件（最多 5 秒）
-        for _ in 0..MARKER_POLL_ATTEMPTS {
-            if Path::new(&marker).exists() {
-                let _ = fs::remove_file(&marker);
-                let _ = fs::remove_file(&temp_path);
+        if !Self::wait_for_marker(&marker) {
+            let _ = fs::remove_file(&temp_path);
+            return Err(anyhow!("system hosts write timed out"));
+        }
+        let _ = fs::remove_file(&marker);
+        let _ = fs::remove_file(&temp_path);
 
-                // 授权 API 拿不到命令退出码，读回来验证一下
-                let written = fs::read_to_string(&self.hosts_path)
-                    .with_context(|| format!("failed to read system hosts: {}", self.hosts_path))?;
-                if written != *content {
-                    return Err(anyhow!("failed to write system hosts: content mismatch"));
-                }
-
-                info!("wrote system hosts file");
-                return Ok(());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(MARKER_POLL_INTERVAL_MS));
+        // 授权 API 拿不到命令退出码，读回来验证一下
+        let written = fs::read_to_string(&self.hosts_path)
+            .with_context(|| format!("failed to read system hosts: {}", self.hosts_path))?;
+        if written != *content {
+            return Err(anyhow!("failed to write system hosts: content mismatch"));
         }
 
-        let _ = fs::remove_file(&temp_path);
-        Err(anyhow!("system hosts write timed out"))
+        info!("wrote system hosts file");
+        Ok(())
     }
 
     fn flush_dns_cache(&self) -> Result<()> {
@@ -293,16 +309,12 @@ impl HostsPlatform for MacosPlatform {
         self.run_privileged(&command)?;
 
         // 等标记文件（最多 5 秒）
-        for _ in 0..MARKER_POLL_ATTEMPTS {
-            if Path::new(&marker).exists() {
-                let _ = fs::remove_file(&marker);
-                info!("DNS cache flushed");
-                return Ok(());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(MARKER_POLL_INTERVAL_MS));
+        if !Self::wait_for_marker(&marker) {
+            return Err(anyhow!("DNS cache flush timed out"));
         }
-
-        Err(anyhow!("DNS cache flush timed out"))
+        let _ = fs::remove_file(&marker);
+        info!("DNS cache flushed");
+        Ok(())
     }
 
     fn has_admin_privileges(&self) -> bool {
@@ -327,72 +339,97 @@ impl HostsPlatform for MacosPlatform {
         let mut retried = false;
 
         loop {
-            let auth = Self::authorize()?;
+            let auth = Self::cached_authorization()?;
+            Self::register_right_once(auth);
 
-            // 注册自定义授权项：授权框里显示具体要干什么（只注册一次，这步很慢）
-            static RIGHT_REGISTERED: std::sync::atomic::AtomicBool =
-                std::sync::atomic::AtomicBool::new(false);
-            if !RIGHT_REGISTERED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                register_privilege_right(auth);
+            let status = Self::copy_admin_rights(auth)?;
+            if status == errAuthorizationSuccess {
+                return Ok(());
             }
-
-            // 申请管理员权限：已授权过就直接通过，不弹框
-            // 标准 execute 权限 + 自定义授权项（弹框描述）
-            let sys_right = CString::new("system.privilege.admin").unwrap();
-            let custom_right = CString::new(PRIVILEGE_RIGHT).unwrap();
-            let mut items = [
-                AuthorizationItem {
-                    name: sys_right.as_ptr(),
-                    valueLength: 0,
-                    value: std::ptr::null_mut(),
-                    flags: 0,
-                },
-                AuthorizationItem {
-                    name: custom_right.as_ptr(),
-                    valueLength: 0,
-                    value: std::ptr::null_mut(),
-                    flags: 0,
-                },
-            ];
-            let rights = AuthorizationRights {
-                count: 2,
-                items: items.as_mut_ptr(),
-            };
-            let status = unsafe {
-                AuthorizationCopyRights(
-                    auth,
-                    &rights,
-                    std::ptr::null(),
-                    kAuthorizationFlagExtendRights
-                        | kAuthorizationFlagInteractionAllowed
-                        | kAuthorizationFlagPreAuthorize,
-                    std::ptr::null_mut(),
-                )
-            };
-            if status != errAuthorizationSuccess {
-                if status == errAuthorizationCanceled {
-                    return Err(anyhow!("user canceled authorization"));
-                }
-                // 缓存授权失效：清缓存重试一次（SwitchHosts 同款逻辑）
-                if !retried
-                    && (status == errAuthorizationInvalidRef || status == errAuthorizationDenied)
-                {
-                    warn!("cached authorization invalid ({}), retrying once", status);
-                    *AUTH_REF
-                        .lock()
-                        .map_err(|_| anyhow!("authorization mutex error"))? = None;
-                    retried = true;
-                    continue;
-                }
-                return Err(anyhow!("authorization failed: {}", status));
+            if status == errAuthorizationCanceled {
+                return Err(anyhow!("user canceled authorization"));
             }
-
-            return Ok(());
+            // 缓存授权失效：清缓存重试一次（SwitchHosts 同款逻辑）
+            if !retried
+                && (status == errAuthorizationInvalidRef || status == errAuthorizationDenied)
+            {
+                warn!("cached authorization invalid ({}), retrying once", status);
+                Self::invalidate_auth_ref()?;
+                retried = true;
+                continue;
+            }
+            return Err(anyhow!("authorization failed: {}", status));
         }
     }
 
     fn hosts_file_path(&self) -> &str {
         &self.hosts_path
+    }
+}
+
+/// 生成一个不重复的完成标记路径
+fn next_marker(tag: &str) -> String {
+    format!(
+        "/tmp/hostswitch_{}_{}_{}",
+        tag,
+        std::process::id(),
+        MARKER_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
+
+/// 注册自定义授权项，授权框里显示"要干什么"而不是干巴巴的进程名
+#[cfg(not(test))]
+fn register_privilege_right(auth: AuthorizationRef) {
+    use core_foundation_sys::base::CFTypeRef;
+
+    let description = "hostswitch needs administrator privileges to modify the system hosts file";
+    // 管理员规则：弹框要求输入管理员密码
+    let rule = "authenticate-session-owner-as-admin";
+
+    let Some(rule_cf) = cf_string(rule) else {
+        return;
+    };
+    let Some(desc_cf) = cf_string(description) else {
+        cf_release(rule_cf as CFTypeRef);
+        return;
+    };
+
+    unsafe {
+        let status = AuthorizationRightSet(
+            auth,
+            c"com.hostswitch.admin".as_ptr(),
+            rule_cf as CFTypeRef,
+            desc_cf,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+        );
+        if status != errAuthorizationSuccess {
+            debug!("failed to register privilege right: {}", status);
+        }
+    }
+
+    cf_release(rule_cf as CFTypeRef);
+    cf_release(desc_cf as CFTypeRef);
+}
+
+/// 创建 CoreFoundation 字符串；失败返回 None，指针由调用方释放
+#[cfg(not(test))]
+fn cf_string(text: &str) -> Option<core_foundation_sys::string::CFStringRef> {
+    use core_foundation_sys::base::kCFAllocatorDefault;
+    use core_foundation_sys::string::{kCFStringEncodingUTF8, CFStringCreateWithCString};
+
+    let text_c = CString::new(text).ok()?;
+    let cf = unsafe {
+        CFStringCreateWithCString(kCFAllocatorDefault, text_c.as_ptr(), kCFStringEncodingUTF8)
+    };
+    if cf.is_null() { None } else { Some(cf) }
+}
+
+/// 释放 CoreFoundation 对象
+#[cfg(not(test))]
+fn cf_release(obj: core_foundation_sys::base::CFTypeRef) {
+    unsafe {
+        core_foundation_sys::base::CFRelease(obj);
     }
 }
 

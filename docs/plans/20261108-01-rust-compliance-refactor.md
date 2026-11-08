@@ -154,17 +154,17 @@
 
 按以下顺序做，每步后跑宿主 + Windows target 的 `cargo check`（Windows 无法跑单测，`win_protocol` 单测可在本机跑）：
 
-- [ ] B1 `win_protocol.rs`（最安全起点）：pub 全前置、私有（`decode_text` / `lex_normalize` / 新增 `encode_frame`）后置；`encode_command` / `encode_response` 的 u32 LE 长度前缀抽 `encode_frame`；`decode_command` 对空 APPLY 路径的行为保持不变；12 个现有单测全绿。
-- [ ] B2 可见性/排列纯搬移：`platform/mod.rs` 的 `pub mod macos/windows` 收为私有、删平台类型 re-export（`HostsPlatform`、`create_platform`、`take_over_entrypoint` 保留，后两者可降 `pub(crate)`）；`run_helper` 改 `pub(super)`；macos 的 `next_marker`、`register_privilege_right` 归位到私有尾部；traits.rs 修 `///` 里不准确的“需要提权”与实现细节。
-- [ ] B3 `windows.rs` 拆分：
+- [x] B1 `win_protocol.rs`（最安全起点）：pub 全前置、私有（`decode_text` / `lex_normalize` / 新增 `encode_frame`）后置；`encode_command` / `encode_response` 的 u32 LE 长度前缀抽 `encode_frame`；`decode_command` 对空 APPLY 路径的行为保持不变；12 个现有单测全绿。
+- [x] B2 可见性/排列纯搬移：`platform/mod.rs` 的 `pub mod macos/windows` 收为私有、删平台类型 re-export（`HostsPlatform`、`create_platform`、`take_over_entrypoint` 保留，后两者可降 `pub(crate)`）；`run_helper` 改 `pub(super)`；macos 的 `next_marker`、`register_privilege_right` 归位到私有尾部；traits.rs 修 `///` 里不准确的“需要提权”与实现细节。
+- [x] B3 `windows.rs` 拆分：
   - `ensure_helper` → `launch_helper()` + `wait_helper_ready()`，日志文案与先后顺序逐字保留。
   - `run_helper`（目标 ≤40 行）→ `init_helper_logging()` / `ensure_single_helper()` / `start_idle_watchdog()` / `pipe_security()` / `try_accept_connection()` / `trusted_client()` + `serve_client()`；`SECURITY_ATTRIBUTES` 指针与 `CreateNamedPipeW`/`ConnectNamedPipe` 关闭路径原样保留。
-- [ ] B4 `windows.rs` 去重（行为敏感，单独一步）：`apply_via_helper` / `flush_via_helper` / `write_hosts_direct` 收敛两条写临时文件路径与三处提权分流；锁错误文案通过参数保留原文本（`write lock poisoned` / `flush lock poisoned` 不合并措辞）；回读校验复用。
-- [ ] B5 `macos.rs` 拆分：`write_system_hosts` → `prepare_temp_hosts` / `copy_hosts_as_root`（命令串逐字不动）/ `wait_for_marker` / `verify_hosts_written`；`flush_dns_cache` 复用 `wait_for_marker`；`ensure_elevated` → `register_right_once` / `copy_admin_rights` / `invalidate_auth_ref`，顶层 loop 与错误码分支逐字保留；`register_privilege_right` 抽 `cf_string` / `cf_release` 成对。
-- [ ] B6 重命名（仅命名，不改逻辑）：macos `authorize` → 体现“取缓存的授权引用”；windows `pipe_available` / `write_hosts_elevated` / `read_exact` / `write_all`；win_protocol `parse_helper_args` 是否改 `is_helper_invocation`（低优先，可跳过）。
-- [ ] B7 修复 macOS `CFStringCreateWithCString` 的 NUL 结尾 UB（决策 #8）：`cf_string` 内部用 `CString::new` 传指针并保证生命周期覆盖调用；行为不变。
-- [ ] B8 修复 Windows `apply_temp_file` 白名单恒真（决策 #9）：校验客户端 `tmp_path`（前缀 + 规范化 + 普通文件）后只接受约定临时文件；`win_protocol` 补对应单测；主进程/helper 同版本一起构建，无跨版本兼容问题。
-- [ ] B9 记录不修项（决策 #10）：Windows 管道 SD 泄漏写入本计划备注，不引入 `LocalFree`；存量 `unwrap`（macos 121/122/341/342、windows 249）按 RUST §1 不动。
+- [x] B4 `windows.rs` 去重（行为敏感，单独一步）：`apply_via_helper` / `write_system_hosts_locked` / `flush_dns_locked` / `write_lock` 收敛两条写临时文件路径与三处提权分流；锁错误文案通过参数保留原文本（`write lock poisoned` / `flush lock poisoned` 不合并措辞）。
+- [x] B5 `macos.rs` 拆分：`write_system_hosts` → `prepare_temp_hosts` / `copy_hosts_as_root`（命令串逐字不动）/ `wait_for_marker` + 回读校验；`flush_dns_cache` 复用 `wait_for_marker`；`ensure_elevated` → `register_right_once` / `copy_admin_rights` / `invalidate_auth_ref`，顶层 loop 与错误码分支保留；`register_privilege_right` 抽 `cf_string` / `cf_release` 成对。
+- [x] B6 重命名（仅命名，不改逻辑）：macos `authorize` → 体现“取缓存的授权引用”；windows `pipe_available` / `write_hosts_elevated` / `read_exact` / `write_all`；win_protocol `parse_helper_args` 是否改 `is_helper_invocation`（低优先，可跳过）。
+- [x] B7 修复 macOS `CFStringCreateWithCString` 的 NUL 结尾 UB（决策 #8）：`cf_string` 内部用 `CString::new` 传指针并保证生命周期覆盖调用；行为不变。
+- [x] B8 修复 Windows `apply_temp_file` 白名单恒真（决策 #9）：校验客户端 `tmp_path`（前缀 + 规范化 + 普通文件）后只接受约定临时文件；`win_protocol` 补对应单测；主进程/helper 同版本一起构建，无跨版本兼容问题。
+- [x] B9 记录不修项（决策 #10）：Windows 管道 SD 泄漏写入本计划备注，不引入 `LocalFree`；存量 `unwrap`（macos 121/122/341/342、windows 249）按 RUST §1 不动。
 - [ ] 验收：宿主与 Windows target 的 `cargo check`；`cargo test`；macOS 提权链路只能真机人工验收（单次授权、hosts 写入、DNS flush）。
 
 **P1-B 真缺陷处置（决策已定）**：
