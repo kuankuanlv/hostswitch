@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
@@ -60,109 +61,6 @@ impl EnvManager {
     }
 
     // ---------- 环境列表管理 ----------
-
-    /// 从 envs/ 目录加载所有环境
-    fn load_envs(&mut self) -> Result<()> {
-        self.envs.clear();
-
-        let entries = std::fs::read_dir(&self.store.envs_dir)
-            .with_context(|| format!("failed to read envs directory: {}", self.store.envs_dir.display()))?;
-
-        let mut env_map: HashMap<String, Env> = HashMap::new();
-
-        for entry in entries {
-            let entry = entry.context("failed to read directory entry")?;
-            let path = entry.path();
-
-            if !path.is_file() {
-                continue;
-            }
-
-            let file_name = match path.file_name().and_then(|n| n.to_str()) {
-                Some(name) => name.to_string(),
-                None => continue,
-            };
-
-            // 跳过隐藏文件
-            if file_name.starts_with('.') {
-                continue;
-            }
-
-            let is_builtin = file_name == GLOBAL_ENV_ID;
-            let metadata = entry.metadata().context("failed to get file metadata")?;
-
-            // 用文件创建时间作 created_at，修改时间作 updated_at
-            let created_at = metadata
-                .created()
-                .ok()
-                .map(|t| t.into())
-                .unwrap_or_else(Local::now);
-
-            let updated_at = metadata
-                .modified()
-                .ok()
-                .map(|t| t.into())
-                .unwrap_or_else(Local::now);
-
-            let env = Env {
-                id: file_name.clone(),
-                name: file_name,
-                is_builtin,
-                created_at,
-                updated_at,
-            };
-
-            env_map.insert(env.id.clone(), env);
-        }
-
-        // Global 始终在最前，其余按创建时间排（新增的放后面）
-        let mut sorted_envs: Vec<Env> = env_map.into_values().collect();
-        sorted_envs.sort_by(|a, b| {
-            if a.id == GLOBAL_ENV_ID {
-                std::cmp::Ordering::Less
-            } else if b.id == GLOBAL_ENV_ID {
-                std::cmp::Ordering::Greater
-            } else {
-                a.created_at.cmp(&b.created_at)
-            }
-        });
-
-        self.envs = sorted_envs;
-
-        debug!(count = self.envs.len(), "env list loaded");
-        Ok(())
-    }
-
-    /// 确保 local 内置环境存在
-    fn ensure_local_env(&mut self) -> Result<()> {
-        if self.envs.iter().any(|e| e.id == GLOBAL_ENV_ID) {
-            return Ok(());
-        }
-
-        info!("first launch: initializing local env");
-
-        // 读取当前系统 hosts 作为 local 的初始内容
-        let system_hosts = self.platform.read_system_hosts()
-            .context("failed to read system hosts, cannot initialize local env")?;
-
-        // 尝试从系统 hosts 提取 local 段（处理旧版安装过的场景）
-        let local_content = HostsMerger::extract_local_content(&system_hosts)
-            .unwrap_or(system_hosts);
-
-        // 创建 local 环境
-        let local_env = Env::global();
-        self.store.save_env_content(GLOBAL_ENV_ID, &local_content)?;
-        self.envs.insert(0, local_env);
-
-        // state 中 selected_env_id 不存在时，默认 local
-        if !self.envs.iter().any(|e| e.id == self.state.selected_env_id) {
-            self.state.selected_env_id = GLOBAL_ENV_ID.to_string();
-        }
-
-        self.save_state()?;
-
-        Ok(())
-    }
 
     /// 获取所有 env 列表
     pub fn envs(&self) -> &[Env] {
@@ -227,42 +125,18 @@ impl EnvManager {
     /// 新增 env
     pub fn create_env(&mut self, name: &str) -> Result<&Env> {
         let name = name.trim();
-
-        if name.is_empty() {
-            return Err(anyhow!("environment name cannot be empty"));
-        }
-
-        if name == GLOBAL_ENV_ID {
-            return Err(anyhow!("cannot create an environment named 'local' (reserved)"));
-        }
-
-        // 检查名称合法性（不能包含路径分隔符等）
-        if name.contains('/') || name.contains('\\') || name.contains('\0') {
-            return Err(anyhow!("environment name contains illegal characters"));
-        }
-
-        // 检查是否已存在
-        if self.envs.iter().any(|e| e.id == name) {
-            return Err(anyhow!("environment already exists: {}", name));
-        }
+        self.validate_env_name(name)?;
 
         let env = Env::new(name.to_string(), name.to_string());
         self.store.save_env_content(name, "")?;
         self.envs.push(env);
-
-        // Global 恒在最前，其余保持创建顺序（新增的放最后）
-        self.envs.sort_by(|a, b| {
-            if a.id == GLOBAL_ENV_ID {
-                std::cmp::Ordering::Less
-            } else if b.id == GLOBAL_ENV_ID {
-                std::cmp::Ordering::Greater
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        });
+        self.sort_envs();
 
         info!(name, "new environment created");
-        Ok(self.envs.iter().find(|e| e.id == name).unwrap())
+        self.envs
+            .iter()
+            .find(|e| e.id == name)
+            .ok_or_else(|| anyhow!("created env missing: {}", name))
     }
 
     /// 删除 env（local 不可删）
@@ -291,73 +165,6 @@ impl EnvManager {
         self.save_state()?;
 
         info!(env_id, "environment deleted");
-        Ok(())
-    }
-
-    /// 重命名 env（local 不可改名）
-    #[allow(dead_code)]
-    pub fn rename_env(&mut self, env_id: &str, new_name: &str) -> Result<()> {
-        if env_id == GLOBAL_ENV_ID {
-            return Err(anyhow!("cannot rename the built-in local environment"));
-        }
-
-        let new_name = new_name.trim();
-
-        if new_name.is_empty() {
-            return Err(anyhow!("new name cannot be empty"));
-        }
-
-        if new_name == GLOBAL_ENV_ID {
-            return Err(anyhow!("cannot rename to 'local'"));
-        }
-
-        if new_name.contains('/') || new_name.contains('\\') || new_name.contains('\0') {
-            return Err(anyhow!("environment name contains illegal characters"));
-        }
-
-        // 检查是否已存在
-        if self.envs.iter().any(|e| e.id == new_name) {
-            return Err(anyhow!("environment already exists: {}", new_name));
-        }
-
-        // 检查原 env 是否存在
-        if !self.envs.iter().any(|e| e.id == env_id) {
-            return Err(anyhow!("env not found: {}", env_id));
-        }
-
-        // 重命名文件
-        self.store.rename_env_file(env_id, new_name)?;
-
-        // 更新 env 列表
-        if let Some(env) = self.envs.iter_mut().find(|e| e.id == env_id) {
-            env.id = new_name.to_string();
-            env.name = new_name.to_string();
-            env.updated_at = Local::now();
-        }
-
-        // 更新 state 中的引用
-        if self.state.active_env_ids.iter().any(|id| id == env_id) {
-            self.state.active_env_ids.retain(|id| id != env_id);
-            self.state.active_env_ids.push(new_name.to_string());
-        }
-        if self.state.selected_env_id == env_id {
-            self.state.selected_env_id = new_name.to_string();
-        }
-
-        // Global 恒在最前，其余保持创建顺序（新增的放最后）
-        self.envs.sort_by(|a, b| {
-            if a.id == GLOBAL_ENV_ID {
-                std::cmp::Ordering::Less
-            } else if b.id == GLOBAL_ENV_ID {
-                std::cmp::Ordering::Greater
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        });
-
-        self.save_state()?;
-
-        info!(old = env_id, new = new_name, "environment renamed");
         Ok(())
     }
 
@@ -510,6 +317,141 @@ impl EnvManager {
         (warnings, errors)
     }
 
+    /// 从 envs/ 目录加载所有环境
+    fn load_envs(&mut self) -> Result<()> {
+        self.envs = Self::read_env_entries(&self.store.envs_dir)?;
+        self.sort_envs();
+
+        debug!(count = self.envs.len(), "env list loaded");
+        Ok(())
+    }
+
+    /// 读 envs/ 目录下的环境文件
+    fn read_env_entries(envs_dir: &Path) -> Result<Vec<Env>> {
+        let entries = std::fs::read_dir(envs_dir)
+            .with_context(|| format!("failed to read envs directory: {}", envs_dir.display()))?;
+
+        let mut env_map: HashMap<String, Env> = HashMap::new();
+        for entry in entries {
+            let entry = entry.context("failed to read directory entry")?;
+            if let Some(env) = Self::read_env_entry(&entry)? {
+                env_map.insert(env.id.clone(), env);
+            }
+        }
+
+        Ok(env_map.into_values().collect())
+    }
+
+    /// 读单个目录项；非普通文件、隐藏文件、无文件名返回 None
+    fn read_env_entry(entry: &std::fs::DirEntry) -> Result<Option<Env>> {
+        let path = entry.path();
+        if !path.is_file() {
+            return Ok(None);
+        }
+
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            return Ok(None);
+        };
+
+        // 跳过隐藏文件
+        if file_name.starts_with('.') {
+            return Ok(None);
+        }
+
+        let metadata = entry.metadata().context("failed to get file metadata")?;
+
+        // 用文件创建时间作 created_at，修改时间作 updated_at
+        let created_at = metadata
+            .created()
+            .ok()
+            .map(|time| time.into())
+            .unwrap_or_else(Local::now);
+        let updated_at = metadata
+            .modified()
+            .ok()
+            .map(|time| time.into())
+            .unwrap_or_else(Local::now);
+
+        Ok(Some(Env {
+            id: file_name.to_string(),
+            name: file_name.to_string(),
+            is_builtin: file_name == GLOBAL_ENV_ID,
+            created_at,
+            updated_at,
+        }))
+    }
+
+    /// 排序：Global 恒在最前，其余按创建时间
+    fn sort_envs(&mut self) {
+        self.envs.sort_by(|a, b| {
+            if a.id == GLOBAL_ENV_ID {
+                std::cmp::Ordering::Less
+            } else if b.id == GLOBAL_ENV_ID {
+                std::cmp::Ordering::Greater
+            } else {
+                a.created_at.cmp(&b.created_at)
+            }
+        });
+    }
+
+    /// 确保 local 内置环境存在
+    fn ensure_local_env(&mut self) -> Result<()> {
+        if self.envs.iter().any(|e| e.id == GLOBAL_ENV_ID) {
+            return Ok(());
+        }
+
+        info!("first launch: initializing local env");
+
+        // 读取当前系统 hosts 作为 local 的初始内容
+        let system_hosts = self
+            .platform
+            .read_system_hosts()
+            .context("failed to read system hosts, cannot initialize local env")?;
+
+        // 尝试从系统 hosts 提取 local 段（处理旧版安装过的场景）
+        let local_content =
+            HostsMerger::extract_local_content(&system_hosts).unwrap_or(system_hosts);
+
+        // 创建 local 环境
+        let local_env = Env::global();
+        self.store.save_env_content(GLOBAL_ENV_ID, &local_content)?;
+        self.envs.insert(0, local_env);
+
+        // state 中 selected_env_id 不存在时，默认 local
+        if !self.envs.iter().any(|e| e.id == self.state.selected_env_id) {
+            self.state.selected_env_id = GLOBAL_ENV_ID.to_string();
+        }
+
+        self.save_state()?;
+
+        Ok(())
+    }
+
+    /// 校验新环境名：非空、非保留名、无路径分隔符、不重名
+    fn validate_env_name(&self, name: &str) -> Result<()> {
+        if name.is_empty() {
+            return Err(anyhow!("environment name cannot be empty"));
+        }
+
+        if name == GLOBAL_ENV_ID {
+            return Err(anyhow!(
+                "cannot create an environment named 'local' (reserved)"
+            ));
+        }
+
+        // 检查名称合法性（不能包含路径分隔符等）
+        if name.contains('/') || name.contains('\\') || name.contains('\0') {
+            return Err(anyhow!("environment name contains illegal characters"));
+        }
+
+        // 检查是否已存在
+        if self.envs.iter().any(|e| e.id == name) {
+            return Err(anyhow!("environment already exists: {}", name));
+        }
+
+        Ok(())
+    }
+
     /// 保存 state
     fn save_state(&self) -> Result<()> {
         self.store.save_state(&self.state)
@@ -603,7 +545,7 @@ mod tests {
         HostsMerger::merge_many(envs, Some(LOCAL_CONTENT))
     }
 
-    #[derive(Debug, PartialEq, Eq)]
+    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
     enum PlanKind {
         InSync,
         Write,
@@ -672,50 +614,48 @@ mod tests {
         manager.delete_env("dev").unwrap();
     }
 
-    fn sync_cases() -> [SyncCase; 6] {
-        [
-            SyncCase {
-                name: "没有激活环境且系统 hosts 一致",
-                setup: setup_no_active_env,
-                action: no_action,
-                expected: PlanKind::InSync,
-            },
-            SyncCase {
-                name: "启用环境后需要写盘",
-                setup: setup_inactive_dev,
-                action: activate_dev,
-                expected: PlanKind::Write,
-            },
-            SyncCase {
-                name: "保存激活环境的新内容后需要写盘",
-                setup: setup_active_dev,
-                action: save_active_dev_content,
-                expected: PlanKind::Write,
-            },
-            SyncCase {
-                name: "保存未激活环境内容后保持一致",
-                setup: setup_active_dev_with_other,
-                action: save_inactive_env_content,
-                expected: PlanKind::InSync,
-            },
-            SyncCase {
-                name: "删除激活环境后需要写盘",
-                setup: setup_active_dev,
-                action: delete_active_dev,
-                expected: PlanKind::Write,
-            },
-            SyncCase {
-                name: "激活环境内容格式非法时报错",
-                setup: setup_active_dev,
-                action: save_invalid_active_content,
-                expected: PlanKind::Error,
-            },
-        ]
-    }
+    static SYNC_CASES: [SyncCase; 6] = [
+        SyncCase {
+            name: "没有激活环境且系统 hosts 一致",
+            setup: setup_no_active_env,
+            action: no_action,
+            expected: PlanKind::InSync,
+        },
+        SyncCase {
+            name: "启用环境后需要写盘",
+            setup: setup_inactive_dev,
+            action: activate_dev,
+            expected: PlanKind::Write,
+        },
+        SyncCase {
+            name: "保存激活环境的新内容后需要写盘",
+            setup: setup_active_dev,
+            action: save_active_dev_content,
+            expected: PlanKind::Write,
+        },
+        SyncCase {
+            name: "保存未激活环境内容后保持一致",
+            setup: setup_active_dev_with_other,
+            action: save_inactive_env_content,
+            expected: PlanKind::InSync,
+        },
+        SyncCase {
+            name: "删除激活环境后需要写盘",
+            setup: setup_active_dev,
+            action: delete_active_dev,
+            expected: PlanKind::Write,
+        },
+        SyncCase {
+            name: "激活环境内容格式非法时报错",
+            setup: setup_active_dev,
+            action: save_invalid_active_content,
+            expected: PlanKind::Error,
+        },
+    ];
 
     #[test]
     fn test_sync_plan_returns_expected_plan() {
-        for case in sync_cases() {
+        for case in &SYNC_CASES {
             let dir = tempdir().unwrap();
             let mut manager = (case.setup)(dir.path());
             (case.action)(&mut manager);

@@ -28,67 +28,85 @@ pub struct HostsValidator;
 impl HostsValidator {
     /// 校验整个 hosts 内容，返回所有问题
     pub fn validate(content: &str) -> Vec<ValidationIssue> {
-        let mut issues = Vec::new();
-
-        for (idx, line) in content.lines().enumerate() {
-            let line_number = idx + 1;
-            let trimmed = line.trim();
-
-            // 空行跳过
-            if trimmed.is_empty() {
-                continue;
-            }
-
-            // 注释行跳过
-            if trimmed.starts_with('#') {
-                continue;
-            }
-
-            // 解析行
-            let parts: Vec<&str> = trimmed.split_whitespace().collect();
-
-            if parts.len() < 2 {
-                issues.push(ValidationIssue {
-                    line_number,
-                    level: ValidationLevel::Error,
-                    message: "format error: each line needs at least IP and hostname columns".to_string(),
-                    line_content: line.to_string(),
-                });
-                continue;
-            }
-
-            let ip_str = parts[0];
-            let domain = parts[1];
-
-            // 校验 IP 格式
-            if !Self::is_valid_ip(ip_str) {
-                issues.push(ValidationIssue {
-                    line_number,
-                    level: ValidationLevel::Error,
-                    message: format!("invalid IP address: {}", ip_str),
-                    line_content: line.to_string(),
-                });
-                continue;
-            }
-
-            // 校验域名格式（warning 级别）
-            if !Self::is_valid_domain(domain) {
-                issues.push(ValidationIssue {
-                    line_number,
-                    level: ValidationLevel::Warning,
-                    message: format!("suspicious domain format: {}", domain),
-                    line_content: line.to_string(),
-                });
-            }
-        }
-
-        issues
+        content
+            .lines()
+            .enumerate()
+            .flat_map(|(index, line)| Self::validate_line(index + 1, line))
+            .collect()
     }
 
     /// 检查是否有错误级别的问题
     pub fn has_errors(issues: &[ValidationIssue]) -> bool {
         issues.iter().any(|i| i.level == ValidationLevel::Error)
     }
+
+    /// 组装一条校验结果
+    fn validation_issue(
+        line_number: usize,
+        level: ValidationLevel,
+        message: String,
+        line_content: &str,
+    ) -> ValidationIssue {
+        ValidationIssue {
+            line_number,
+            level,
+            message,
+            line_content: line_content.to_string(),
+        }
+    }
+
+    /// 校验单行，返回该行的问题
+    fn validate_line(line_number: usize, line: &str) -> Vec<ValidationIssue> {
+        let trimmed = line.trim();
+
+        // 空行与注释行跳过
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            return Vec::new();
+        }
+
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() < 2 {
+            return vec![Self::validation_issue(
+                line_number,
+                ValidationLevel::Error,
+                "format error: each line needs at least IP and hostname columns".to_string(),
+                line,
+            )];
+        }
+
+        Self::validate_columns(line_number, parts[0], parts[1], line)
+    }
+
+    /// 校验 IP 与域名两列
+    fn validate_columns(
+        line_number: usize,
+        ip_str: &str,
+        domain: &str,
+        line: &str,
+    ) -> Vec<ValidationIssue> {
+        // 校验 IP 格式
+        if !Self::is_valid_ip(ip_str) {
+            return vec![Self::validation_issue(
+                line_number,
+                ValidationLevel::Error,
+                format!("invalid IP address: {}", ip_str),
+                line,
+            )];
+        }
+
+        // 校验域名格式（warning 级别）
+        if !Self::is_valid_domain(domain) {
+            return vec![Self::validation_issue(
+                line_number,
+                ValidationLevel::Warning,
+                format!("suspicious domain format: {}", domain),
+                line,
+            )];
+        }
+
+        Vec::new()
+    }
+
     /// 校验 IP 地址格式（IPv4 或 IPv6）
     fn is_valid_ip(ip: &str) -> bool {
         // 尝试解析为 IPv4

@@ -123,26 +123,6 @@ impl ConfigStore {
 
         Ok(())
     }
-
-    /// 环境文件改名（旧文件不存在就跳过）
-    #[allow(dead_code)]
-    pub fn rename_env_file(&self, old_id: &str, new_id: &str) -> Result<()> {
-        let old_path = self.env_file_path(old_id);
-        let new_path = self.env_file_path(new_id);
-
-        if old_path.exists() {
-            fs::rename(&old_path, &new_path).with_context(|| {
-                format!(
-                    "环境文件改名失败: {} -> {}",
-                    old_path.display(),
-                    new_path.display()
-                )
-            })?;
-            info!(old_id, new_id, "已重命名环境文件");
-        }
-
-        Ok(())
-    }
 }
 
 #[cfg(test)]

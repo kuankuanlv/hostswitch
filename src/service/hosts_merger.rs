@@ -39,25 +39,6 @@ impl HostsMerger {
         result
     }
 
-    /// 从系统 hosts 内容中提取第一个 env 部分（去掉标记）
-    /// 兼容旧版本的中文标记（标记英文化之前写入的文件）
-    #[allow(dead_code)]
-    pub fn extract_env_content(system_content: &str) -> Option<String> {
-        let (start, start_marker) = find_marker(system_content, ENV_START_MARKER)?;
-        let (end, _) = find_marker(system_content, ENV_END_MARKER)?;
-
-        if start >= end {
-            return None;
-        }
-
-        let after_start = &system_content[start + start_marker.len()..];
-        let env_part = after_start.strip_prefix('\n').unwrap_or(after_start);
-        let (end_in_part, _) = find_marker(env_part, ENV_END_MARKER)?;
-
-        let env_content = &env_part[..end_in_part];
-        Some(env_content.trim_end().to_string())
-    }
-
     /// 从系统 hosts 内容中提取 local 部分（到下一个 env 标记或结尾为止）
     pub fn extract_local_content(system_content: &str) -> Option<String> {
         let (marker, marker_str) = find_marker(system_content, LOCAL_MARKER)?;
@@ -150,16 +131,6 @@ mod tests {
     fn test_merge_no_local_no_envs() {
         // local 不激活且没有 env，结果为空（此时不会调用写入）
         assert_eq!(HostsMerger::merge_many(&[], None), "");
-    }
-
-    #[test]
-    fn test_extract_env_content() {
-        let env1 = "192.168.1.100 dev.example.com";
-        let local = "127.0.0.1 localhost";
-        let merged = HostsMerger::merge_many(&[env1], Some(local));
-
-        let extracted = HostsMerger::extract_env_content(&merged).unwrap();
-        assert_eq!(extracted, env1);
     }
 
     #[test]

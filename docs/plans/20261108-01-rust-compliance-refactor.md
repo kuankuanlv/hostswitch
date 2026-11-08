@@ -139,16 +139,16 @@
 
 ### P1-A 服务/存储/模型层重构（行为不变）
 
-- [ ] `env_manager.rs`
-  - [ ] 成员排列：`load_envs`、`ensure_local_env` 移到文件末尾“内部”私有段（相关小节注释随代码迁移）。
-  - [ ] `load_envs` 拆为 `read_env_entries()` + `sort_envs()`，`load_envs` 只做“重置列表 + 填入 + 记录日志”。
-  - [ ] `create_env`：抽出 `validate_env_name(name, existing_ids)`（空名/保留名/非法字符/重名），`rename_env` 复用同一份（消除两份近似校验），主函数只编排。
-  - [ ] `rename_env`：复用 `validate_env_name`，拆出 `apply_rename`；随后按决策 #5 整体删除（连同 `ConfigStore::rename_env_file`、`HostsMerger::extract_env_content` 及对应单测）。
-  - [ ] 删除三处无调用方 API 后确认 `cargo check` 无 `dead_code` 告警。
-  - [ ] 测试 `sync_cases` 改为 `static SYNC_CASES: [SyncCase; 6]`（或拆成每条一个 const），消除 42 行函数。
-- [ ] `hosts_validator.rs`：`validate` 拆出 `validate_line(line_number, line) -> Vec<ValidationIssue>`。
-- [ ] `hosts_merger.rs` / `config_store.rs` / `model/*` / `logs.rs` / `main.rs`：复核（无超长函数/成员排列问题则只做注释与可见性核对）。
-- [ ] 验收：`cargo check --all-targets && cargo test` 全绿。
+- [x] `env_manager.rs`
+  - [x] 成员排列：`load_envs`、`ensure_local_env` 移到“内部”私有段。
+  - [x] `load_envs` 拆为 `read_env_entries()` / `read_env_entry()` / `sort_envs()`，`load_envs` 只做加载与日志。
+  - [x] `create_env` 抽出 `validate_env_name`，主函数只编排。
+  - [x] 按决策 #5 删除 `rename_env`、`ConfigStore::rename_env_file`、`HostsMerger::extract_env_content` 及对应单测。
+  - [x] 删除后 `cargo check` 无 `dead_code` 告警。
+  - [x] 测试用例表改为 `static SYNC_CASES: [SyncCase; 6]`。
+- [x] `hosts_validator.rs`：`validate` 拆出 `validate_line` 与 `validation_issue`，`has_errors` 归位到 pub 段。
+- [x] `hosts_merger.rs` / `config_store.rs` / `model/*` / `logs.rs` / `main.rs`：复核完成，除删除未用 API 外无改动。
+- [x] 验收：`cargo check --all-targets`（0 warning）与 `cargo test`（37 passed）全绿。
 
 ### P1-B 平台层重构（行为不变，风险最高）
 
