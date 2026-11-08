@@ -177,12 +177,12 @@
 
 按以下顺序做，每步 `cargo check --all-targets && cargo test`；唯一布局测试 `test_sidebar_layout_stable` 依赖 `draw_frame` 入口与 Panel id/顺序，不可改：
 
-- [ ] C1 `theme.rs`（纯视觉、无布局）：`apply_theme` 移到 `build_visuals` 之前；`build_visuals` 拆 `base_visuals` / `apply_surface_colors` / `apply_state_colors` / `apply_widget_style`（写覆盖顺序不变）；`RADIUS_WINDOW` 私有、其余 `pub(super)`。
-- [ ] C2 `new_env_dialog.rs`：改名 `show_new_env_dialog`；拆 `draw_name_field` / `draw_dialog_buttons`（返回动作枚举）；`Window::open`、`request_focus`、Create 先于 Close 的处理顺序保持；`pub(super)`。
-- [ ] C3 `editor.rs`：改名 `draw_editor`；拆 `draw_editor_header` / `draw_text_editor` / `draw_save_row`；Frame 与 `set_min_size` 留原位；TextEdit 自动 id 依赖 widget 调用顺序，header/间距/滚动区顺序不得变。
-- [ ] C4 `sidebar.rs`：`GreenCheckbox::ui` 拆 `fill_color` / `border_color` / `paint_tick` / `paint`；`sidebar_ui` 改名 `draw_sidebar`，拆 `draw_sidebar_header` / `draw_env_list` / `draw_env_row`（行内再分显示名 / 右键菜单 / 激活开关）；`ui.id().with("plus_env_btn")` 的取存位置与 `actions` push 顺序（Switch / Delete / Toggle）保持。
-- [ ] C5 小共享项（只动 sidebar + mod 的小段）：`"Current Machine"` 提为 ui 层常量；顶栏/底栏共用 `bar_frame`（仅 margin 不同）。
-- [ ] C6 `egui/mod.rs`（最大，最后）：`draw_frame` 拆 `draw_top_bar` / `draw_status_bar` / `draw_sidebar_panel` / `draw_editor_panel` / `draw_new_env_dialog` / `draw_console_window`；保持 Panel 顺序 top→bottom→left→Central、闭包外 handle、`c` 每帧只取一次、BUFFER 锁不跨 `app.handle`（LogLayer 会再锁同一 std Mutex，会死锁）。
+- [x] C1 `theme.rs`（纯视觉、无布局）：`apply_theme` 移到 `build_visuals` 之前；`build_visuals` 拆 `base_visuals` / `apply_surface_colors` / `apply_state_colors` / `apply_widget_style`（写覆盖顺序不变）；`RADIUS_WINDOW` 私有、其余 `pub(super)`。
+- [x] C2 `new_env_dialog.rs`：改名 `show_new_env_dialog`；拆 `draw_name_field` / `draw_dialog_buttons`（返回动作枚举）；`Window::open`、`request_focus`、Create 先于 Close 的处理顺序保持；`pub(super)`。
+- [x] C3 `editor.rs`：改名 `draw_editor`；拆 `draw_editor_header` / `draw_text_editor` / `draw_save_row`；Frame 与 `set_min_size` 留原位；TextEdit 自动 id 依赖 widget 调用顺序，header/间距/滚动区顺序不得变。
+- [x] C4 `sidebar.rs`：`GreenCheckbox::ui` 拆 `fill_color` / `border_color` / `paint_tick` / `paint`；`sidebar_ui` 改名 `draw_sidebar`，拆 `draw_sidebar_header` / `draw_env_list` / `draw_env_row`（行内再分显示名 / 右键菜单 / 激活开关）；`ui.id().with("plus_env_btn")` 的取存位置与 `actions` push 顺序（Switch / Delete / Toggle）保持。
+- [x] C5 小共享项：`CURRENT_MACHINE_NAME` 提到 ui 模块常量；顶栏/底栏共用 `bar_frame`（仅 margin 不同）。
+- [x] C6 `egui/mod.rs`（最大，最后）：`draw_frame` 拆 `draw_top_bar` / `draw_status_bar` / `draw_sidebar_panel` / `draw_editor_panel` / `draw_new_env_dialog` / `draw_console_window`；保持 Panel 顺序 top→bottom→left→Central、闭包外 handle、`c` 每帧只取一次、BUFFER 锁不跨 `app.handle`（LogLayer 会再锁同一 std Mutex，会死锁）。
 - [ ] 验收：`cargo check --all-targets && cargo test`；UI 视觉交用户确认（按全局规则不做截图自检）。
 
 ### P2 乐观锁（行为变更，独立一批）
