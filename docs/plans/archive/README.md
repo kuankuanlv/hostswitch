@@ -6,3 +6,4 @@
 | 归档日期 | 文件 | 简述 | 附件 |
 |---|---|---|---|
 | 2026-11-08 | 20261108-01-rust-compliance-refactor.md | 全量 Rust 规范重构 + 系统 hosts 写入冲突检测 | — |
+| 2026-11-08 | 20261108-02-hosts-mirror-and-builtin-name.md | 内置 hosts 只读镜像、统一显示名与环境段注释 | — |

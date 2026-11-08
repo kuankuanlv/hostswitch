@@ -23,6 +23,7 @@
 | 名称 | 阶段 | 触及域 | 说明 |
 |---|---|---|---|
 | `20261108-01-rust-compliance-refactor` | ⑦ 已归档 | `src/service`、`src/platform`、`src/ui`、`src/storage`、`docs/plans`、`README.md`、`.gitignore` | 全量 Rust 规范重构 + 系统 hosts 写入冲突检测（乐观锁） |
+| `20261108-02-hosts-mirror-and-builtin-name` | ⑦ 已归档 | `src/service`、`src/ui`、`README.md`、`docs/plans` | 内置 hosts 只读镜像、统一显示名与环境段注释 |
 
 （只登记 ⑤⑥⑦；完成即归档，滚动保留：全部未完成 + 最近 5 条 ⑦）
 
