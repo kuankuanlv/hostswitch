@@ -31,9 +31,8 @@ impl ConfigStore {
         let envs_dir = root_dir.join(ENVS_DIR_NAME);
         let state_file = root_dir.join(STATE_FILE_NAME);
 
-        fs::create_dir_all(&envs_dir).with_context(|| {
-            format!("创建环境目录失败: {}", envs_dir.display())
-        })?;
+        fs::create_dir_all(&envs_dir)
+            .with_context(|| format!("创建环境目录失败: {}", envs_dir.display()))?;
 
         debug!(root = %root_dir.display(), "ConfigStore 已初始化");
 
@@ -52,12 +51,10 @@ impl ConfigStore {
             return Ok(AppState::default());
         }
 
-        let content = fs::read_to_string(&self.state_file).with_context(|| {
-            format!("读 state.json 失败: {}", self.state_file.display())
-        })?;
+        let content = fs::read_to_string(&self.state_file)
+            .with_context(|| format!("读 state.json 失败: {}", self.state_file.display()))?;
 
-        let state: AppState =
-            serde_json::from_str(&content).context("解析 state.json 失败")?;
+        let state: AppState = serde_json::from_str(&content).context("解析 state.json 失败")?;
 
         debug!(active_envs = ?state.active_env_ids, "已加载 state.json");
 
@@ -66,12 +63,10 @@ impl ConfigStore {
 
     /// 写全局状态
     pub fn save_state(&self, state: &AppState) -> Result<()> {
-        let content =
-            serde_json::to_string_pretty(state).context("序列化 state.json 失败")?;
+        let content = serde_json::to_string_pretty(state).context("序列化 state.json 失败")?;
 
-        fs::write(&self.state_file, content).with_context(|| {
-            format!("写 state.json 失败: {}", self.state_file.display())
-        })?;
+        fs::write(&self.state_file, content)
+            .with_context(|| format!("写 state.json 失败: {}", self.state_file.display()))?;
 
         debug!("已保存 state.json");
         Ok(())
@@ -104,8 +99,7 @@ impl ConfigStore {
     pub fn save_env_content(&self, env_id: &str, content: &str) -> Result<()> {
         let path = self.env_file_path(env_id);
 
-        fs::write(&path, content)
-            .with_context(|| format!("写环境文件失败: {}", path.display()))?;
+        fs::write(&path, content).with_context(|| format!("写环境文件失败: {}", path.display()))?;
 
         debug!(env_id, len = content.len(), "已保存环境内容");
         Ok(())

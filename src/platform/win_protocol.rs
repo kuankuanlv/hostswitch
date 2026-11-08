@@ -1,9 +1,9 @@
 //! Windows 提权助手的纯逻辑层：协议编解码、参数解析、路径白名单。
-//! 不依赖任何 Windows API，可在任意平台编译运行（便于本机单测）。
+//! 不依赖任何 Windows API，可在任意平台编译运行。
 
 use std::path::Path;
 
-/// 客户端 → 助手的命令
+/// 客户端发给助手的命令
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HelperCommand {
     /// 将临时文件内容应用到系统 hosts（参数为临时文件路径）
@@ -14,7 +14,7 @@ pub enum HelperCommand {
     Bye,
 }
 
-/// 助手 → 客户端的响应
+/// 助手返回给客户端的响应
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HelperResponse {
     Ok,
@@ -68,7 +68,7 @@ pub fn decode_response(bytes: &[u8]) -> Option<HelperResponse> {
     None
 }
 
-/// 解析 helper 启动参数：`--helper`
+/// 解析 helper 启动参数 --helper
 /// args 为 std::env::args() 的完整收集（含程序名，自动跳过）
 pub fn parse_helper_args(args: &[String]) -> bool {
     args.get(1).map(String::as_str) == Some("--helper")
@@ -98,9 +98,7 @@ pub fn is_allowed_temp_file(p: &Path) -> bool {
         return false;
     }
 
-    p.canonicalize()
-        .map(|real| real.is_file())
-        .unwrap_or(false)
+    p.canonicalize().map(|real| real.is_file()).unwrap_or(false)
 }
 
 /// 编码一帧：u32 LE 长度前缀 + UTF-8 文本

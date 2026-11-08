@@ -175,7 +175,7 @@ impl HostswitchApp {
     }
 
     /// 刷新底栏文案
-    pub fn set_status(&mut self, text: impl Into<String>, status_type: StatusType) {
+    fn set_status(&mut self, text: impl Into<String>, status_type: StatusType) {
         self.status_message = Some(StatusMessage {
             text: text.into(),
             status_type,
@@ -183,12 +183,12 @@ impl HostswitchApp {
     }
 
     /// 清底栏，回到 Ready
-    pub fn clear_status(&mut self) {
+    fn clear_status(&mut self) {
         self.status_message = None;
     }
 
     /// 换编辑目标；未保存改动直接丢弃
-    pub fn switch_env(&mut self, env_id: &str) {
+    fn switch_env(&mut self, env_id: &str) {
         match self.env_manager.set_selected_env(env_id) {
             Ok(_) => match self.env_manager.get_env_content(env_id) {
                 Ok(content) => {
@@ -211,10 +211,13 @@ impl HostswitchApp {
     }
 
     /// 把编辑器内容存进当前环境；内容参与合并时再同步系统 hosts
-    pub fn save_current_env(&mut self) {
+    fn save_current_env(&mut self) {
         let env_id = self.env_manager.selected_env_id().to_string();
 
-        match self.env_manager.save_env_content(&env_id, &self.current_content) {
+        match self
+            .env_manager
+            .save_env_content(&env_id, &self.current_content)
+        {
             Ok(_) => {
                 self.is_dirty = false;
 
@@ -232,7 +235,7 @@ impl HostswitchApp {
     }
 
     /// 启用或停用环境，改完激活集合后统一走同步
-    pub fn toggle_env(&mut self, env_id: &str) {
+    fn toggle_env(&mut self, env_id: &str) {
         if self.is_busy() {
             return;
         }
@@ -245,7 +248,7 @@ impl HostswitchApp {
     }
 
     /// 新建环境并切过去编辑
-    pub fn create_new_env(&mut self, name: &str) {
+    fn create_new_env(&mut self, name: &str) {
         match self.env_manager.create_env(name) {
             Ok(env) => {
                 let env_id = env.id.clone();
@@ -261,7 +264,7 @@ impl HostswitchApp {
     }
 
     /// 删环境；删完统一走同步
-    pub fn delete_env(&mut self, env_id: &str) {
+    fn delete_env(&mut self, env_id: &str) {
         if self.is_busy() {
             return;
         }
@@ -363,12 +366,7 @@ impl HostswitchApp {
     }
 
     /// 算一次目标内容，和系统现有 hosts 比对；不同才起后台写盘
-    fn try_sync(
-        &mut self,
-        success: PendingSuccess,
-        rollback: Option<(String, bool)>,
-        force: bool,
-    ) {
+    fn try_sync(&mut self, success: PendingSuccess, rollback: Option<(String, bool)>, force: bool) {
         match self.env_manager.sync_plan() {
             Ok(SyncPlan::InSync) => {
                 self.out_of_sync = false;

@@ -11,11 +11,13 @@ mod service;
 mod storage;
 mod ui;
 
-use ui::{run, UiError};
+use ui::{UiError, run};
 
 fn main() {
     // Windows：若是 --helper 提权子进程，这里直接接管并返回
-    if adapt_windows() { return; }
+    if adapt_windows() {
+        return;
+    }
 
     // 主进程日志（固定文件名，方便排障）
     if let Err(e) = logs::init_global_logging("hostswitch-debug.log") {

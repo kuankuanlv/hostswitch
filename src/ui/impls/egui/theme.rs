@@ -26,11 +26,7 @@ pub(super) struct ThemeColors {
 
 /// 当前主题的配色
 pub(super) fn theme_colors(dark: bool) -> ThemeColors {
-    if dark {
-        dark_colors()
-    } else {
-        light_colors()
-    }
+    if dark { dark_colors() } else { light_colors() }
 }
 
 /// 深色主题配色

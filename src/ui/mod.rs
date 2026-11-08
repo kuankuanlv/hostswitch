@@ -13,7 +13,7 @@ pub struct UiError {
 }
 
 impl UiError {
-    pub fn new(message: impl Into<String>) -> Self {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
         }
@@ -35,7 +35,7 @@ impl From<anyhow::Error> for UiError {
 }
 
 /// 启动 UI；窗口标题与尺寸直接传参，不另包结构体
-pub fn run(
+pub(crate) fn run(
     title: &'static str,
     inner_size: (f32, f32),
     min_size: (f32, f32),

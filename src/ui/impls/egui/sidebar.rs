@@ -1,7 +1,7 @@
 use eframe::egui;
 use egui::{Color32, CornerRadius, Stroke};
 
-use super::theme::{theme_colors, ThemeColors, RADIUS_SMALL};
+use super::theme::{RADIUS_SMALL, ThemeColors, theme_colors};
 
 /// 环境列表的展示数据（只读视图，UI 层不碰应用状态）
 pub(super) struct EnvInfo {
@@ -27,23 +27,23 @@ struct GreenCheckbox {
 
 impl GreenCheckbox {
     /// 复选框底色
-    fn fill_color(&self) -> Color32 {
+    fn fill_color(&self, c: &ThemeColors) -> Color32 {
         if self.checked {
-            Color32::from_rgba_unmultiplied(74, 222, 128, if self.cooling { 14 } else { 26 })
+            Color32::from_rgba_unmultiplied(
+                c.success.r(),
+                c.success.g(),
+                c.success.b(),
+                if self.cooling { 14 } else { 26 },
+            )
         } else {
-            Color32::from_rgb(14, 16, 19)
+            c.extreme_bg
         }
     }
 
     /// 边框颜色：冷却=弱灰，勾选=主题 success 绿，悬停=弱文本色，否则=默认描边
     fn border_color(&self, c: &ThemeColors, hovered: bool) -> Color32 {
         if self.cooling {
-            Color32::from_rgba_unmultiplied(
-                c.text_weak.r(),
-                c.text_weak.g(),
-                c.text_weak.b(),
-                110,
-            )
+            Color32::from_rgba_unmultiplied(c.text_weak.r(), c.text_weak.g(), c.text_weak.b(), 110)
         } else if self.checked {
             c.success
         } else if hovered {
@@ -71,11 +71,14 @@ impl GreenCheckbox {
     /// 绘制复选框
     fn paint(&self, painter: &egui::Painter, rect: egui::Rect, c: &ThemeColors, hovered: bool) {
         let rounding = CornerRadius::same(4);
-        painter.rect_filled(rect, rounding, self.fill_color());
+        painter.rect_filled(rect, rounding, self.fill_color(c));
         painter.rect_stroke(
             rect,
             rounding,
-            Stroke::new(if self.checked { 1.5 } else { 1.0 }, self.border_color(c, hovered)),
+            Stroke::new(
+                if self.checked { 1.5 } else { 1.0 },
+                self.border_color(c, hovered),
+            ),
             egui::StrokeKind::Inside,
         );
         if self.checked {
@@ -111,12 +114,12 @@ impl egui::Widget for GreenCheckbox {
 /// 左侧环境列表面板：纯渲染，返回用户操作
 ///
 /// 入参说明：
-/// - `envs`：环境的只读展示数据（id/名称/是否内置）
-/// - `selected_id`：当前选中（编辑）的环境 id
-/// - `active_ids`：当前已激活（启用）的环境 id 列表，支持多选
-/// - `toggle_cooling`：hosts 正在写入时为 true，开关进入冷却（不可点、半透明）
+/// - envs：环境的只读展示数据（id/名称/是否内置）
+/// - selected_id：当前选中（编辑）的环境 id
+/// - active_ids：当前已激活（启用）的环境 id 列表，支持多选
+/// - toggle_cooling：hosts 正在写入时为 true，开关进入冷却（不可点、半透明）
 ///
-/// 返回值：上报用户意图的 `SidebarAction` 列表，由应用层统一执行；
+/// 返回值：上报用户意图的 SidebarAction 列表，由应用层统一执行；
 /// 渲染层只读状态、只产出意图，不直接修改任何应用状态。
 pub(super) fn draw_sidebar(
     ui: &mut egui::Ui,
@@ -131,7 +134,14 @@ pub(super) fn draw_sidebar(
     ui.vertical(|ui| {
         draw_sidebar_header(ui, &c, &mut actions);
         ui.add_space(6.0);
-        draw_env_list(ui, envs, selected_id, active_ids, toggle_cooling, &mut actions);
+        draw_env_list(
+            ui,
+            envs,
+            selected_id,
+            active_ids,
+            toggle_cooling,
+            &mut actions,
+        );
     });
 
     // 将本次交互产生的全部操作一次性上报给应用层执行
@@ -153,14 +163,14 @@ fn draw_sidebar_header(ui: &mut egui::Ui, c: &ThemeColors, actions: &mut Vec<Sid
             let plus_id = ui.id().with("plus_env_btn");
             let plus_hovered = ui.data(|d| d.get_temp::<bool>(plus_id)).unwrap_or(false);
             let plus_resp = ui.add(
-                egui::Button::new(
-                    egui::RichText::new("+")
-                        .size(16.0)
-                        .color(Color32::from_rgb(10, 12, 14)),
-                )
-                .fill(if plus_hovered { c.accent_hover } else { c.accent })
-                .corner_radius(13)
-                .min_size(egui::vec2(24.0, 24.0)),
+                egui::Button::new(egui::RichText::new("+").size(16.0).color(c.bg_panel))
+                    .fill(if plus_hovered {
+                        c.accent_hover
+                    } else {
+                        c.accent
+                    })
+                    .corner_radius(13)
+                    .min_size(egui::vec2(24.0, 24.0)),
             );
             ui.data_mut(|d| d.insert_temp(plus_id, plus_resp.hovered()));
             // 点击 "+"：上报新建环境对话框操作，由应用层打开
@@ -237,12 +247,8 @@ fn draw_row_button(
 }
 
 /// 环境行右键菜单：删除
-fn draw_row_delete_menu(
-    response: &egui::Response,
-    env_id: &str,
-    actions: &mut Vec<SidebarAction>,
-) {
-    // 提前 clone env_id：context_menu 闭包需要捕获所有权（move）
+fn draw_row_delete_menu(response: &egui::Response, env_id: &str, actions: &mut Vec<SidebarAction>) {
+    // context_menu 闭包按值捕获，先把 id 复制出来
     let env_id = env_id.to_string();
     response.context_menu(|ui| {
         if ui.button("Delete").clicked() {

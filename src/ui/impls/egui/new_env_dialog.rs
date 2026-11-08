@@ -74,9 +74,7 @@ fn draw_dialog_buttons(
         }
 
         // Enter 键确认
-        if response.lost_focus()
-            && ui.input(|i| i.key_pressed(egui::Key::Enter))
-            && confirm_enabled
+        if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && confirm_enabled
         {
             action = Some(DialogAction::Create(name.trim().to_string()));
         }

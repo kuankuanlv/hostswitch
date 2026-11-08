@@ -1,4 +1,4 @@
-//! Windows 平台实现：常驻提权助手 + 命名管道（Pattern C + 护栏）。
+//! Windows 平台实现：常驻提权助手 + 命名管道。
 //! 提权行为与 macOS 对齐：会话内仅首次弹 UAC，后续静默复用。
 
 use std::io;
@@ -6,28 +6,28 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use tracing::{debug, error, info, warn};
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, HANDLE, INVALID_HANDLE_VALUE,
 };
-use windows_sys::Win32::Security::{
-    GetTokenInformation, TokenElevation, TokenUser, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
-};
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+use windows_sys::Win32::Security::{
+    GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenUser,
+};
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, ReadFile, WriteFile, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, OPEN_EXISTING,
+    CreateFileW, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    OPEN_EXISTING, ReadFile, WriteFile,
 };
 use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW,
-    PROCESS_QUERY_LIMITED_INFORMATION,
+    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    QueryFullProcessImageNameW,
 };
 
 use super::traits::HostsPlatform;
 use super::win_protocol::{
-    decode_response, encode_command, HelperCommand, HelperResponse, WINDOWS_HOSTS_PATH,
+    HelperCommand, HelperResponse, WINDOWS_HOSTS_PATH, decode_response, encode_command,
 };
 
 /// 命名管道名前缀：\\.\pipe\hostswitch_helper_<用户 SID>（helper 常驻，按用户隔离复用）
@@ -215,7 +215,11 @@ impl WindowsPlatform {
             static FIRST_FAILURE: std::sync::atomic::AtomicBool =
                 std::sync::atomic::AtomicBool::new(false);
             if !FIRST_FAILURE.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                debug!("pipe connect failed: {} (error {})", e, e.raw_os_error().unwrap_or(-1));
+                debug!(
+                    "pipe connect failed: {} (error {})",
+                    e,
+                    e.raw_os_error().unwrap_or(-1)
+                );
             }
             Err(e)
         } else {
@@ -391,7 +395,7 @@ impl HostsPlatform for WindowsPlatform {
     }
 }
 
-/// UTF-8 → UTF-16 以 NUL 结尾（Windows API 需要）
+/// UTF-8 转 UTF-16 并以 NUL 结尾（Windows API 需要）
 fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -409,7 +413,10 @@ fn read_message(handle: HANDLE) -> io::Result<Vec<u8>> {
     read_pipe_exact(handle, &mut len_buf)?;
     let len = u32::from_le_bytes(len_buf) as usize;
     if len > MAX_MESSAGE {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "message too large"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "message too large",
+        ));
     }
     let mut buf = vec![0u8; len];
     read_pipe_exact(handle, &mut buf)?;
@@ -512,8 +519,8 @@ fn accept_loop(
     self_exe: &str,
 ) -> Result<()> {
     loop {
-        let Some(handle) = try_accept_connection(pipe_name, pipe_sa)
-            .context("CreateNamedPipeW failed")?
+        let Some(handle) =
+            try_accept_connection(pipe_name, pipe_sa).context("CreateNamedPipeW failed")?
         else {
             continue;
         };
@@ -540,9 +547,7 @@ fn serve_connection(handle: HANDLE) -> Result<ServeOutcome> {
     let outcome = serve_client(handle)?;
     disconnect_and_close(handle);
     // 记录活动时间，空闲计时重新开始
-    let _ = LAST_ACTIVITY
-        .lock()
-        .map(|mut g| *g = Some(Instant::now()));
+    let _ = LAST_ACTIVITY.lock().map(|mut g| *g = Some(Instant::now()));
     Ok(outcome)
 }
 
@@ -556,27 +561,27 @@ fn disconnect_and_close(handle: HANDLE) {
 
 /// helper 进程独立日志：主进程日志尚未初始化，文件名带 PID 防多实例互相覆盖
 fn init_helper_logging() -> Result<()> {
-    crate::logs::init_global_logging(&format!(
-        "hostswitch-helper-{}.log",
-        std::process::id()
-    ))
-    .context("failed to init helper logging")
+    crate::logs::init_global_logging(&format!("hostswitch-helper-{}.log", std::process::id()))
+        .context("failed to init helper logging")
 }
 
 /// 空闲超时监视线程：长时间无客户端活动则退出
 fn start_idle_watchdog() {
-    let _ = LAST_ACTIVITY
-        .lock()
-        .map(|mut g| *g = Some(Instant::now()));
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(30));
-        let idle = LAST_ACTIVITY
-            .lock()
-            .map(|g| g.map(|t| t.elapsed()).unwrap_or(Duration::ZERO))
-            .unwrap_or(Duration::ZERO);
-        if idle > HELPER_IDLE_TIMEOUT {
-            info!("helper idle for {}s, exiting", HELPER_IDLE_TIMEOUT.as_secs());
-            std::process::exit(0);
+    let _ = LAST_ACTIVITY.lock().map(|mut g| *g = Some(Instant::now()));
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(30));
+            let idle = LAST_ACTIVITY
+                .lock()
+                .map(|g| g.map(|t| t.elapsed()).unwrap_or(Duration::ZERO))
+                .unwrap_or(Duration::ZERO);
+            if idle > HELPER_IDLE_TIMEOUT {
+                info!(
+                    "helper idle for {}s, exiting",
+                    HELPER_IDLE_TIMEOUT.as_secs()
+                );
+                std::process::exit(0);
+            }
         }
     });
 }
@@ -689,7 +694,10 @@ fn serve_client(handle: HANDLE) -> Result<ServeOutcome> {
                 Err(e) => HelperResponse::Err(format!("{:#}", e)),
             },
             Some(HelperCommand::Bye) => {
-                let _ = write_message(handle, &super::win_protocol::encode_response(&HelperResponse::Ok));
+                let _ = write_message(
+                    handle,
+                    &super::win_protocol::encode_response(&HelperResponse::Ok),
+                );
                 return Ok(ServeOutcome::Bye);
             }
             None => HelperResponse::Err("unknown command".to_string()),
@@ -709,16 +717,18 @@ fn apply_temp_file(tmp_path: &str) -> Result<()> {
         return Err(anyhow!("temp file path not allowed: {}", tmp_path));
     }
 
-    let data = std::fs::read(source)
-        .with_context(|| format!("failed to read temp file: {}", tmp_path))?;
+    let data =
+        std::fs::read(source).with_context(|| format!("failed to read temp file: {}", tmp_path))?;
     let target = Path::new(WINDOWS_HOSTS_PATH);
     std::fs::write(target, &data)
         .with_context(|| format!("failed to write system hosts: {}", target.display()))?;
 
-    // 写后回读校验（对齐 macOS marker 校验语义）
+    // 写后回读校验
     let written = std::fs::read(target)?;
     if written != data {
-        return Err(anyhow!("system hosts write verification failed: content mismatch"));
+        return Err(anyhow!(
+            "system hosts write verification failed: content mismatch"
+        ));
     }
     info!("wrote system hosts file");
     // 同进程内刷新 DNS：无 ipconfig 黑窗，且省一次客户端管道往返
@@ -762,7 +772,7 @@ fn current_user_sid() -> Option<String> {
     }
 }
 
-/// UTF-16 以 NUL 结尾的字符串 → Rust String
+/// UTF-16 以 NUL 结尾的字符串转 Rust String
 fn pwstr_to_string(ptr: *const u16) -> String {
     if ptr.is_null() {
         return String::new();
@@ -776,7 +786,7 @@ fn pwstr_to_string(ptr: *const u16) -> String {
 
 #[link(name = "dnsapi")]
 unsafe extern "system" {
-    /// 未文档化但与 `ipconfig /flushdns` 等价；不弹控制台窗口
+    /// 未文档化，与 ipconfig /flushdns 等价；不弹控制台窗口
     fn DnsFlushResolverCache() -> i32;
 }
 

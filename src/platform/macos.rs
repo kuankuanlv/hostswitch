@@ -11,22 +11,22 @@ use std::process::Command;
 #[cfg(not(test))]
 use std::sync::Mutex;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 #[cfg(not(test))]
 use security_framework_sys::authorization::{
-    kAuthorizationFlagDefaults, errAuthorizationDenied, errAuthorizationInvalidRef,
-    errAuthorizationSuccess, AuthorizationCreate, AuthorizationRef,
-};
-#[cfg(not(test))]
-use security_framework_sys::authorization::{
+    AuthorizationCopyRights, AuthorizationExecuteWithPrivileges, AuthorizationItem,
+    AuthorizationRightSet, AuthorizationRights, errAuthorizationCanceled,
     kAuthorizationFlagExtendRights, kAuthorizationFlagInteractionAllowed,
-    kAuthorizationFlagPreAuthorize, errAuthorizationCanceled, AuthorizationCopyRights,
-    AuthorizationExecuteWithPrivileges, AuthorizationItem, AuthorizationRightSet,
-    AuthorizationRights,
+    kAuthorizationFlagPreAuthorize,
 };
-use tracing::{debug, info};
+#[cfg(not(test))]
+use security_framework_sys::authorization::{
+    AuthorizationCreate, AuthorizationRef, errAuthorizationDenied, errAuthorizationInvalidRef,
+    errAuthorizationSuccess, kAuthorizationFlagDefaults,
+};
 #[cfg(not(test))]
 use tracing::warn;
+use tracing::{debug, info};
 
 use super::HostsPlatform;
 
@@ -67,7 +67,9 @@ impl MacosPlatform {
     /// 获取（或创建）进程级授权引用
     #[cfg(not(test))]
     fn cached_authorization() -> Result<AuthorizationRef> {
-        let mut guard = AUTH_REF.lock().map_err(|_| anyhow!("authorization mutex error"))?;
+        let mut guard = AUTH_REF
+            .lock()
+            .map_err(|_| anyhow!("authorization mutex error"))?;
 
         if let Some(auth) = *guard {
             return Ok(auth as AuthorizationRef);
@@ -153,7 +155,10 @@ impl MacosPlatform {
             if stderr.contains("User canceled") || stderr.contains("(-128)") {
                 return Err(anyhow!("user canceled authorization"));
             }
-            return Err(anyhow!("privileged command execution failed: {}", stderr.trim()));
+            return Err(anyhow!(
+                "privileged command execution failed: {}",
+                stderr.trim()
+            ));
         }
 
         Ok(())
@@ -349,7 +354,7 @@ impl HostsPlatform for MacosPlatform {
             if status == errAuthorizationCanceled {
                 return Err(anyhow!("user canceled authorization"));
             }
-            // 缓存授权失效：清缓存重试一次（SwitchHosts 同款逻辑）
+            // 缓存授权失效：清缓存重试一次
             if !retried
                 && (status == errAuthorizationInvalidRef || status == errAuthorizationDenied)
             {
@@ -416,7 +421,7 @@ fn register_privilege_right(auth: AuthorizationRef) {
 #[cfg(not(test))]
 fn cf_string(text: &str) -> Option<core_foundation_sys::string::CFStringRef> {
     use core_foundation_sys::base::kCFAllocatorDefault;
-    use core_foundation_sys::string::{kCFStringEncodingUTF8, CFStringCreateWithCString};
+    use core_foundation_sys::string::{CFStringCreateWithCString, kCFStringEncodingUTF8};
 
     let text_c = CString::new(text).ok()?;
     let cf = unsafe {

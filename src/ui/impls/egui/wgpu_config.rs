@@ -1,6 +1,6 @@
 //! egui-wgpu 配置（仅 egui backend 使用）
 
-/// Windows 强制 DX12（QEMU/RDP 无真实 GPU 时走 WARP）；其他平台默认。
+/// wgpu 后端配置：Windows 固定 DX12，其他平台用默认配置。
 pub fn wgpu_configuration() -> eframe::egui_wgpu::WgpuConfiguration {
     #[cfg(target_os = "windows")]
     {

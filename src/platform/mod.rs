@@ -1,13 +1,13 @@
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(target_os = "windows")]
-mod windows;
+mod traits;
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 mod win_protocol;
-mod traits;
+#[cfg(target_os = "windows")]
+mod windows;
 
-pub(crate) use traits::create_platform;
 pub(crate) use traits::HostsPlatform;
+pub(crate) use traits::create_platform;
 
 /// 平台进程入口接管：Windows 上的特殊进程模式（提权助手，无 UI）在此内部
 /// 检测并处理（含自身日志初始化），返回 true 表示进程已被接管，调用方应退出主流程。

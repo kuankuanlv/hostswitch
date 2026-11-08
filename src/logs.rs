@@ -2,8 +2,8 @@ use std::collections::VecDeque;
 use std::sync::{LazyLock, Mutex};
 
 use tracing::{Event, Subscriber};
-use tracing_subscriber::prelude::*;
 use tracing_subscriber::Layer;
+use tracing_subscriber::prelude::*;
 
 /// 最多保留的日志条数
 const MAX_LOGS: usize = 500;
@@ -13,8 +13,10 @@ pub fn init_global_logging(log_name: &str) -> anyhow::Result<()> {
     let file = std::fs::File::create(std::env::temp_dir().join(log_name))
         .map_err(|e| anyhow::anyhow!("create log file {}: {}", log_name, e))?;
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::from_default_env()
-            .add_directive(tracing::Level::DEBUG.into()))
+        .with(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(tracing::Level::DEBUG.into()),
+        )
         .with(LogLayer)
         .with(tracing_subscriber::fmt::layer())
         .with(
@@ -48,7 +50,12 @@ impl<S: Subscriber> Layer<S> for LogLayer {
         let mut message = String::new();
         event.record(&mut MessageVisitor(&mut message));
 
-        push_log(format!("{:<5} {}: {}", meta.level(), meta.target(), message));
+        push_log(format!(
+            "{:<5} {}: {}",
+            meta.level(),
+            meta.target(),
+            message
+        ));
     }
 }
 

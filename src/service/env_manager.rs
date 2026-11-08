@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::Local;
 use tracing::{debug, info, warn};
 
@@ -189,11 +189,18 @@ impl EnvManager {
         let env_content = self.store.load_env_content(env_id)?;
         let (warning_count, errors) = Self::validate_env_content(&env_content);
         if !errors.is_empty() {
-            warn!(env_id, count = errors.len(), "format validation failed, activation blocked");
+            warn!(
+                env_id,
+                count = errors.len(),
+                "format validation failed, activation blocked"
+            );
             return Err(anyhow!("format validation failed:\n{}", errors.join("\n")));
         }
         if warning_count > 0 {
-            warn!(env_id, warning_count, "format warnings present but not blocking");
+            warn!(
+                env_id,
+                warning_count, "format warnings present but not blocking"
+            );
         }
 
         if !self.is_active(env_id) {
@@ -543,7 +550,9 @@ mod tests {
             state_file: dir.join("state.json"),
         };
         std::fs::create_dir_all(&store.envs_dir).unwrap();
-        store.save_env_content(GLOBAL_ENV_ID, LOCAL_CONTENT).unwrap();
+        store
+            .save_env_content(GLOBAL_ENV_ID, LOCAL_CONTENT)
+            .unwrap();
         for (env_id, content) in envs {
             store.save_env_content(env_id, content).unwrap();
         }
@@ -633,7 +642,9 @@ mod tests {
     }
 
     fn save_inactive_env_content(manager: &mut EnvManager) {
-        manager.save_env_content("other", "10.0.0.8 host-d").unwrap();
+        manager
+            .save_env_content("other", "10.0.0.8 host-d")
+            .unwrap();
     }
 
     fn save_invalid_active_content(manager: &mut EnvManager) {
@@ -733,9 +744,7 @@ mod tests {
 
         *system.lock().unwrap() = "198.51.100.9 external\n".to_string();
         match manager.sync_plan().unwrap() {
-            SyncPlan::Write {
-                system_changed, ..
-            } => assert!(system_changed),
+            SyncPlan::Write { system_changed, .. } => assert!(system_changed),
             SyncPlan::InSync => panic!("external change should require write"),
         }
     }
@@ -754,9 +763,7 @@ mod tests {
 
         manager.confirm_system_hosts(&external);
         match manager.sync_plan().unwrap() {
-            SyncPlan::Write {
-                system_changed, ..
-            } => assert!(!system_changed),
+            SyncPlan::Write { system_changed, .. } => assert!(!system_changed),
             SyncPlan::InSync => panic!("desired differs from external content"),
         }
     }
@@ -777,9 +784,7 @@ mod tests {
 
         *system.lock().unwrap() = "198.51.100.9 external\n".to_string();
         match manager.sync_plan().unwrap() {
-            SyncPlan::Write {
-                system_changed, ..
-            } => assert!(system_changed),
+            SyncPlan::Write { system_changed, .. } => assert!(system_changed),
             SyncPlan::InSync => panic!("external change should require write"),
         }
     }

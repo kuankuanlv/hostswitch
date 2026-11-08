@@ -11,9 +11,9 @@ use egui::{Color32, Margin, Stroke};
 
 use crate::model::GLOBAL_ENV_ID;
 use crate::ui::app::{HostswitchApp, StatusType, UiCommand};
-use crate::ui::{UiError, CURRENT_MACHINE_NAME};
+use crate::ui::{CURRENT_MACHINE_NAME, UiError};
 
-use self::theme::{theme_colors, ThemeColors};
+use self::theme::{ThemeColors, theme_colors};
 
 /// 启动 egui 原生窗口
 pub(super) fn run(
@@ -202,14 +202,15 @@ fn draw_unsaved_badge(ui: &mut egui::Ui, c: &ThemeColors) {
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         egui::Frame::new()
             .corner_radius(9)
-            .fill(Color32::from_rgba_unmultiplied(251, 191, 36, 26))
+            .fill(Color32::from_rgba_unmultiplied(
+                c.warning.r(),
+                c.warning.g(),
+                c.warning.b(),
+                26,
+            ))
             .inner_margin(Margin::symmetric(8, 2))
             .show(ui, |ui| {
-                ui.label(
-                    egui::RichText::new("● Unsaved")
-                        .small()
-                        .color(c.warning),
-                );
+                ui.label(egui::RichText::new("● Unsaved").small().color(c.warning));
             });
     });
 }
@@ -326,7 +327,9 @@ fn draw_console_window(ui: &mut egui::Ui, app: &mut HostswitchApp) {
                 .stick_to_bottom(true)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    let buf = crate::logs::BUFFER.lock().unwrap_or_else(|e| e.into_inner());
+                    let buf = crate::logs::BUFFER
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
                     for line in buf.iter() {
                         ui.monospace(line);
                     }
@@ -372,10 +375,8 @@ mod tests {
     }
 
     fn panel_rect(ctx: &egui::Context, id: &str) -> Option<egui::Rect> {
-        ctx.data_mut(|d| {
-            d.get_persisted::<egui::containers::panel::PanelState>(egui::Id::new(id))
-        })
-        .map(|s| s.outer_rect)
+        ctx.data_mut(|d| d.get_persisted::<egui::containers::panel::PanelState>(egui::Id::new(id)))
+            .map(|s| s.outer_rect)
     }
 
     #[test]
@@ -384,11 +385,7 @@ mod tests {
 
         run_frame(&ctx, &mut shell);
         let first = panel_rect(&ctx, "sidebar").expect("first frame should have sidebar");
-        assert!(
-            first.width() < 300.0,
-            "sidebar too wide: {}",
-            first.width()
-        );
+        assert!(first.width() < 300.0, "sidebar too wide: {}", first.width());
 
         run_frame(&ctx, &mut shell);
         let second = panel_rect(&ctx, "sidebar").expect("second frame should have sidebar");

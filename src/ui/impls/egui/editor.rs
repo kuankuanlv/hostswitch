@@ -1,7 +1,7 @@
 use eframe::egui;
 use egui::{Margin, Stroke};
 
-use super::theme::{theme_colors, ThemeColors, RADIUS_CARD};
+use super::theme::{RADIUS_CARD, ThemeColors, theme_colors};
 
 /// 编辑器操作：渲染层上报用户意图，应用层执行
 #[derive(Clone, Copy)]
