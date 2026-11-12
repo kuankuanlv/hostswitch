@@ -38,8 +38,12 @@ pub fn create_platform() -> Box<dyn HostsPlatform + Send + Sync> {
     {
         Box::new(super::windows::WindowsPlatform::new())
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "linux")]
     {
-        compile_error!("platform not supported yet, macOS and Windows only");
+        Box::new(super::linux::LinuxPlatform::new())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        compile_error!("platform not supported yet, macOS, Windows and Linux only");
     }
 }

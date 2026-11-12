@@ -1,6 +1,6 @@
 # hostswitch
 
-hosts 文件管理与切换工具，纯 Rust 实现，无 WebView。支持 macOS、Windows。
+hosts 文件管理与切换工具，纯 Rust 实现，无 WebView。支持 macOS、Windows、Linux。
 
 ## 项目目录架构
 
@@ -9,6 +9,7 @@ hostswitch/
 ├── Cargo.toml
 ├── build_macos.sh           # macOS 打包（产物在 dist/）
 ├── build_windows.bat        # Windows 本机 MSVC 打包（产物在 dist/）
+├── build_ubuntu.sh          # Ubuntu 打包（.deb 产物在 dist/）
 └── src/
     ├── main.rs              # 入口：平台分流 + 日志 + ui::run（不碰 egui API）
     ├── logs.rs              # 应用内日志缓冲（Console 用）
@@ -21,10 +22,11 @@ hostswitch/
         └── impls/egui/      # egui 具体实现（主题、侧栏、编辑器等）
 ```
 
-双端构建脚本产物目录统一为仓库下的 `dist/`：
+各端构建脚本产物目录统一为仓库下的 `dist/`：
 
 - macOS：`dist/hostswitch.app`（可选 `dist/hostswitch.dmg`）
 - Windows：`dist/hostswitch.exe`
+- Ubuntu：`dist/hostswitch_<version>_<arch>.deb`
 
 ## 配置目录
 
@@ -50,7 +52,7 @@ hostswitch/
 
 ## 关于权限
 
-写系统 hosts、刷 DNS 需要管理员权限。设计是：**平时普通权限跑 UI**，真正写盘时再提权；提权后复用高权限的子进程，未设计成直接管理员权限。
+写系统 hosts、刷 DNS 需要管理员权限。设计是**平时普通权限跑 UI**，真正写盘时才提权；是否复用授权因平台而异，见各平台说明。
 
 ### 共同点
 
@@ -77,6 +79,15 @@ hostswitch/
 - DNS：优先进程内 `DnsFlushResolverCache`，避免弹出 `ipconfig` 黑窗
 - 实现位置：`src/platform/windows.rs`、`src/platform/win_protocol.rs`；入口分流在 `platform::take_over_entrypoint`
 
+### Linux
+
+- 机制：每次写盘用 `pkexec`（polkit）执行固定的 `/usr/bin/install -m 0644 -- <临时文件> /etc/hosts`，不常驻高权限进程
+- 流程：写盘时由桌面 polkit agent 弹出认证框；认证结果由 polkit 按策略缓存（常见 `auth_admin_keep`，约 5 分钟），短时间内连续写盘不重复弹框。缓存归 polkit 管，不是应用维护的状态
+- 前提：系统有 `pkexec`，且桌面会话里有 polkit agent；纯 SSH / 无桌面会话时认证框无处弹出，会直接报错
+- 护栏：命令与参数固定，不经过 shell；临时文件用 `create_new` 防重名/符号链接，写完即删
+- DNS：依次尝试 `resolvectl flush-caches`、`systemd-resolve --flush-caches`、`nscd -i hosts`，都不成功只记日志，不影响 hosts 写入结果
+- 实现位置：`src/platform/linux.rs`
+
 ## 构建与打包
 
 ```bash
@@ -90,16 +101,24 @@ cargo run --release
 
 # Windows：本机 MSVC 单 exe（产物在 dist/）
 build_windows.bat
+
+# Ubuntu：生成 .deb，安装/卸载走 apt
+./build_ubuntu.sh
+sudo apt install ./dist/hostswitch_<version>_<arch>.deb
+sudo apt remove hostswitch
 ```
 
-构建结束会打印产物绝对路径，并暂停等按键（方便双击脚本时看清结果）。
+deb 安装到 `/usr/bin`、`/usr/share/applications`、`/usr/share/icons`；用户配置 `~/.hostswitch` 在卸载后保留，需要彻底清理时手动删除。
 
-macOS 需要 Xcode Command Line Tools；Windows 需要 Rust（msvc）+ VS Build Tools（含 C++ 工具链；签名可选 Windows SDK）。
+macOS 与 Windows 脚本构建结束会打印产物绝对路径，并暂停等按键（方便双击脚本时看清结果）；Ubuntu 脚本直接输出结果，不暂停。
+
+macOS 需要 Xcode Command Line Tools；Windows 需要 Rust（msvc）+ VS Build Tools（含 C++ 工具链；签名可选 Windows SDK）；Linux 编译需要 X11/Wayland 与 GL/Vulkan 开发库（如 `libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libxinerama-dev libgl1-mesa-dev pkg-config`）。
 
 ## 环境要求
 
-- macOS 或 Windows
-- Rust 1.85+
+- macOS、Windows 或 Linux
+- Rust 1.92+
+- Linux 需要 `pkexec`（polkit）和桌面会话里的 polkit agent，以及可用的 Vulkan/OpenGL 驱动
 
 ## License
 
